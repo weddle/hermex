@@ -21,15 +21,29 @@ actor APIClient {
     /// Internal, not private, because the upload and transcribe extensions build
     /// their multipart requests by hand and need the same header injection (#61).
     let customHeaderProvider: @Sendable () -> [CustomHeader]
+    /// Builds the gateway client used by `withGatewayConnection`. Production
+    /// returns `HermesGatewayClient`; tests inject one with `testSendFrame` set
+    /// so gateway-backed RPCs can be asserted without a live WebSocket. Mirrors
+    /// `ChatStreamCoordinator`/`ChatViewModel`'s `gatewayFabricator`.
+    let gatewayFabricator: @MainActor (URL, String, String?, [CustomHeader]) -> HermesGatewayClient
 
     init(
         baseURL: URL,
         session: URLSession? = nil,
         publicMediaSession: URLSession? = nil,
-        customHeaderProvider: @escaping @Sendable () -> [CustomHeader] = { CustomHeaderStore.shared.snapshot() }
+        customHeaderProvider: @escaping @Sendable () -> [CustomHeader] = { CustomHeaderStore.shared.snapshot() },
+        gatewayFabricator: @escaping @MainActor (URL, String, String?, [CustomHeader]) -> HermesGatewayClient = { baseURL, ticket, profile, headers in
+            HermesGatewayClient(
+                baseURL: baseURL,
+                ticket: ticket,
+                profile: profile,
+                customHeaders: headers
+            )
+        }
     ) {
         self.baseURL = baseURL
         self.customHeaderProvider = customHeaderProvider
+        self.gatewayFabricator = gatewayFabricator
 
         // One redirect guard shared by both sessions (same origin + same header
         // provider). Wired into the default sessions so a server-issued
@@ -123,13 +137,9 @@ actor APIClient {
         let ticket = try await mintWebSocketTicket(profile: profile)
         let headers = customHeaderProvider()
         let baseURL = baseURL
+        let fabricator = gatewayFabricator
         return try await Task { @MainActor in
-            let client = HermesGatewayClient(
-                baseURL: baseURL,
-                ticket: ticket,
-                profile: profile,
-                customHeaders: headers
-            )
+            let client = fabricator(baseURL, ticket, profile, headers)
             defer { client.disconnect() }
             try await client.connect()
             // The connect() must complete before the caller issues its first RPC;
