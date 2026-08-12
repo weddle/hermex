@@ -13,38 +13,37 @@ final class MemoryViewModelTests: XCTestCase {
     }
 
     @MainActor
-    func testSaveWritesSelectedSectionAndReloadsMemory() async throws {
-        var requestPaths: [String] = []
+    func testLoadReadsNativeMemoryFiles() async throws {
         let client = makeClient { request in
-            requestPaths.append(request.url?.path ?? "")
+            try Self.nativeMemoryResponse(for: request, soul: "# Soul")
+        }
+        let viewModel = MemoryViewModel(
+            server: try XCTUnwrap(URL(string: "https://example.test")),
+            client: client
+        )
 
-            if request.url?.path == "/api/memory/write" {
-                XCTAssertEqual(request.httpMethod, "POST")
+        await viewModel.load()
+
+        XCTAssertTrue(viewModel.hasLoaded)
+        XCTAssertEqual(viewModel.memoryText, "# Notes")
+        XCTAssertEqual(viewModel.userText, "# Profile")
+        XCTAssertEqual(viewModel.soulText, "# Soul")
+        XCTAssertFalse(viewModel.showsProjectContext)
+    }
+
+    @MainActor
+    func testSaveWritesNativeFileAndReloadsMemory() async throws {
+        var writtenPath: String?
+        var writtenContent: String?
+        let client = makeClient { request in
+            if request.url?.path == "/api/fs/write-text" {
                 let data = try XCTUnwrap(apiTestBodyData(from: request))
-                let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-                XCTAssertEqual(body?["section"] as? String, "soul")
-                XCTAssertEqual(body?["content"] as? String, "# Updated Soul")
-
-                return apiTestJSONResponse("""
-                {
-                  "ok": true,
-                  "section": "soul",
-                  "path": "/Users/test/.hermes/SOUL.md"
-                }
-                """, for: request)
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                writtenPath = body["path"] as? String
+                writtenContent = body["content"] as? String
+                return apiTestJSONResponse(#"{"ok":true,"path":"/opt/data/SOUL.md"}"#, for: request)
             }
-
-            XCTAssertEqual(request.url?.path, "/api/memory")
-            return apiTestJSONResponse("""
-            {
-              "memory": "# Notes",
-              "user": "# Profile",
-              "soul": "# Updated Soul",
-              "memory_mtime": 1770000000,
-              "user_mtime": 1770000100,
-              "soul_mtime": 1770000200
-            }
-            """, for: request)
+            return try Self.nativeMemoryResponse(for: request, soul: "# Updated Soul")
         }
         let viewModel = MemoryViewModel(
             server: try XCTUnwrap(URL(string: "https://example.test")),
@@ -54,135 +53,37 @@ final class MemoryViewModelTests: XCTestCase {
         let didSave = await viewModel.save(section: .soul, content: "# Updated Soul")
 
         XCTAssertTrue(didSave)
-        XCTAssertEqual(requestPaths, ["/api/memory/write", "/api/memory"])
-        XCTAssertEqual(viewModel.memoryText, "# Notes")
-        XCTAssertEqual(viewModel.userText, "# Profile")
+        XCTAssertEqual(writtenPath, "/opt/data/SOUL.md")
+        XCTAssertEqual(writtenContent, "# Updated Soul")
         XCTAssertEqual(viewModel.soulText, "# Updated Soul")
-        XCTAssertEqual(viewModel.soulMtime, Date(timeIntervalSince1970: 1_770_000_200))
         XCTAssertTrue(viewModel.hasLoaded)
-        XCTAssertNil(viewModel.actionErrorMessage)
     }
 
-    @MainActor
-    func testSaveSurfacesRejectedResponseWithoutReloading() async throws {
-        var requestPaths: [String] = []
-        let client = makeClient { request in
-            requestPaths.append(request.url?.path ?? "")
-
-            return apiTestJSONResponse("""
-            {
-              "ok": false,
-              "error": "section rejected"
+    private static func nativeMemoryResponse(
+        for request: URLRequest,
+        soul: String
+    ) throws -> (HTTPURLResponse, Data) {
+        switch request.url?.path {
+        case "/api/profiles":
+            return apiTestJSONResponse(#"{"profiles":[{"name":"default","path":"/opt/data","is_default":true}]}"#, for: request)
+        case "/api/profiles/active":
+            return apiTestJSONResponse(#"{"active":"default"}"#, for: request)
+        case "/api/fs/read-text":
+            let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
+            let path = components?.queryItems?.first(where: { $0.name == "path" })?.value
+            let text: String
+            switch path {
+            case "/opt/data/memories/MEMORY.md": text = "# Notes"
+            case "/opt/data/memories/USER.md": text = "# Profile"
+            case "/opt/data/SOUL.md": text = soul
+            default: throw URLError(.fileDoesNotExist)
             }
-            """, for: request)
+            let data = try JSONSerialization.data(withJSONObject: ["text": text, "path": path ?? ""])
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            return (response, data)
+        default:
+            throw URLError(.badURL)
         }
-        let viewModel = MemoryViewModel(
-            server: try XCTUnwrap(URL(string: "https://example.test")),
-            client: client
-        )
-
-        let didSave = await viewModel.save(section: .memory, content: "# Notes")
-
-        XCTAssertFalse(didSave)
-        XCTAssertEqual(requestPaths, ["/api/memory/write"])
-        XCTAssertEqual(viewModel.actionErrorMessage, "section rejected")
-        XCTAssertFalse(viewModel.hasLoaded)
-    }
-
-    @MainActor
-    func testLoadSurfacesProjectContextDocument() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/memory")
-
-            return apiTestJSONResponse("""
-            {
-              "memory": "# Notes",
-              "user": "# Profile",
-              "soul": "# Soul",
-              "project_context": "# Project rules",
-              "project_context_name": "AGENTS.md",
-              "project_context_workspace": "/Users/test/workspace",
-              "project_context_mtime": 1770000300,
-              "project_context_shadowed": [
-                {
-                  "name": "PROJECT.md",
-                  "path": "/Users/test/PROJECT.md"
-                }
-              ],
-              "external_notes_enabled": true
-            }
-            """, for: request)
-        }
-        let viewModel = MemoryViewModel(
-            server: try XCTUnwrap(URL(string: "https://example.test")),
-            client: client
-        )
-
-        await viewModel.load()
-
-        XCTAssertTrue(viewModel.showsProjectContext)
-        XCTAssertEqual(viewModel.projectContextText, "# Project rules")
-        XCTAssertEqual(viewModel.projectContextName, "AGENTS.md")
-        XCTAssertEqual(viewModel.projectContextWorkspace, "/Users/test/workspace")
-        XCTAssertEqual(viewModel.projectContextMtime, Date(timeIntervalSince1970: 1_770_000_300))
-        XCTAssertTrue(viewModel.isProjectContextShadowed)
-        XCTAssertEqual(viewModel.isExternalNotesEnabled, true)
-        XCTAssertEqual(viewModel.projectContextDetail, "AGENTS.md — /Users/test/workspace")
-    }
-
-    @MainActor
-    func testProjectContextSectionHiddenWithoutFields() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/memory")
-
-            return apiTestJSONResponse("""
-            {
-              "memory": "# Notes",
-              "user": "# Profile",
-              "soul": "# Soul"
-            }
-            """, for: request)
-        }
-        let viewModel = MemoryViewModel(
-            server: try XCTUnwrap(URL(string: "https://example.test")),
-            client: client
-        )
-
-        await viewModel.load()
-
-        XCTAssertTrue(viewModel.hasLoaded)
-        XCTAssertFalse(viewModel.showsProjectContext)
-        XCTAssertFalse(viewModel.isProjectContextShadowed)
-        XCTAssertNil(viewModel.projectContextDetail)
-        XCTAssertNil(viewModel.isExternalNotesEnabled)
-    }
-
-    @MainActor
-    func testProjectContextSectionHiddenForBlankDocumentAndDetailOmitsEmptyParts() async throws {
-        // Upstream returns "" (not null) when no readable project-context file exists.
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/memory")
-
-            return apiTestJSONResponse("""
-            {
-              "memory": "# Notes",
-              "project_context": "  \\n ",
-              "project_context_name": "",
-              "project_context_workspace": "/Users/test/workspace",
-              "project_context_shadowed": []
-            }
-            """, for: request)
-        }
-        let viewModel = MemoryViewModel(
-            server: try XCTUnwrap(URL(string: "https://example.test")),
-            client: client
-        )
-
-        await viewModel.load()
-
-        XCTAssertFalse(viewModel.showsProjectContext)
-        XCTAssertFalse(viewModel.isProjectContextShadowed)
-        XCTAssertEqual(viewModel.projectContextDetail, "/Users/test/workspace")
     }
 
     private func makeClient(

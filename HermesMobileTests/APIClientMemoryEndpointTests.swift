@@ -7,37 +7,34 @@ import UniformTypeIdentifiers
 @testable import HermesMobile
 
 final class APIClientMemoryEndpointTests: APIClientTestCase {
-    func testMemoryBuildsExpectedPathAndDecodesResponse() async throws {
+    func testMemoryReadsNativeProfileFiles() async throws {
+        var requestedPaths: [String] = []
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/memory")
-            XCTAssertEqual(request.httpMethod, "GET")
-
-            return apiTestJSONResponse("""
-            {
-              "memory": "# Notes\\n\\n- Prefer SwiftUI",
-              "user": "# Profile\\n\\n- Name: Developer",
-              "soul": "# Agent Soul\\n\\n- Be concise",
-              "memory_path": "/Users/test/.hermes/memories/MEMORY.md",
-              "user_path": "/Users/test/.hermes/memories/USER.md",
-              "soul_path": "/Users/test/.hermes/SOUL.md",
-              "memory_mtime": 1770000000,
-              "user_mtime": 1770000100,
-              "soul_mtime": "1770000200",
-              "project_context": "# Project\\n\\n- Ship it",
-              "project_context_name": "AGENTS.md",
-              "project_context_path": "/Users/test/workspace/AGENTS.md",
-              "project_context_workspace": "/Users/test/workspace",
-              "project_context_mtime": 1770000300,
-              "project_context_shadowed": [
-                {
-                  "name": "PROJECT.md",
-                  "path": "/Users/test/PROJECT.md",
-                  "shadowed_by": "AGENTS.md"
+            requestedPaths.append(request.url?.path ?? "")
+            switch request.url?.path {
+            case "/api/profiles":
+                return apiTestJSONResponse(#"{"profiles":[{"name":"default","path":"/opt/data","is_default":true}]}"#, for: request)
+            case "/api/profiles/active":
+                return apiTestJSONResponse(#"{"active":"default"}"#, for: request)
+            case "/api/fs/read-text":
+                let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
+                let path = components?.queryItems?.first(where: { $0.name == "path" })?.value
+                let text: String
+                switch path {
+                case "/opt/data/memories/MEMORY.md": text = "# Notes\n\n- Prefer SwiftUI"
+                case "/opt/data/memories/USER.md": text = "# Profile\n\n- Name: Developer"
+                case "/opt/data/SOUL.md": text = "# Agent Soul\n\n- Be concise"
+                default:
+                    let response = HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!
+                    return (response, Data(#"{"detail":"Not found"}"#.utf8))
                 }
-              ],
-              "external_notes_enabled": true
+                let body = try JSONSerialization.data(withJSONObject: ["text": text, "path": path ?? ""])
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+                return (response, body)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
             }
-            """, for: request)
         }
 
         let response = try await client.memory()
@@ -45,149 +42,54 @@ final class APIClientMemoryEndpointTests: APIClientTestCase {
         XCTAssertEqual(response.memory, "# Notes\n\n- Prefer SwiftUI")
         XCTAssertEqual(response.user, "# Profile\n\n- Name: Developer")
         XCTAssertEqual(response.soul, "# Agent Soul\n\n- Be concise")
-        XCTAssertEqual(response.memoryPath, "/Users/test/.hermes/memories/MEMORY.md")
-        XCTAssertEqual(response.userPath, "/Users/test/.hermes/memories/USER.md")
-        XCTAssertEqual(response.soulPath, "/Users/test/.hermes/SOUL.md")
-        XCTAssertEqual(response.memoryMtime, 1_770_000_000)
-        XCTAssertEqual(response.userMtime, 1_770_000_100)
-        XCTAssertEqual(response.soulMtime, 1_770_000_200)
-        XCTAssertEqual(response.projectContext, "# Project\n\n- Ship it")
-        XCTAssertEqual(response.projectContextName, "AGENTS.md")
-        XCTAssertEqual(response.projectContextPath, "/Users/test/workspace/AGENTS.md")
-        XCTAssertEqual(response.projectContextWorkspace, "/Users/test/workspace")
-        XCTAssertEqual(response.projectContextMtime, 1_770_000_300)
-        XCTAssertEqual(response.projectContextShadowed, true)
-        XCTAssertEqual(response.externalNotesEnabled, true)
+        XCTAssertEqual(requestedPaths.filter { $0 == "/api/fs/read-text" }.count, 3)
     }
 
-    func testMemoryToleratesMissingFields() async throws {
+    func testMemoryTreatsMissingNativeFilesAsEmptySections() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/memory")
-
-            return apiTestJSONResponse("""
-            {
-              "memory": "",
-              "user": null
+            switch request.url?.path {
+            case "/api/profiles":
+                return apiTestJSONResponse(#"{"profiles":[{"name":"default","path":"/opt/data","is_default":true}]}"#, for: request)
+            case "/api/profiles/active":
+                return apiTestJSONResponse(#"{"active":"default"}"#, for: request)
+            case "/api/fs/read-text":
+                let response = HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!
+                return (response, Data(#"{"detail":"Not found"}"#.utf8))
+            default:
+                throw URLError(.badURL)
             }
-            """, for: request)
         }
 
         let response = try await client.memory()
 
-        XCTAssertEqual(response.memory, "")
+        XCTAssertNil(response.memory)
         XCTAssertNil(response.user)
         XCTAssertNil(response.soul)
-        XCTAssertNil(response.memoryMtime)
-        XCTAssertNil(response.userMtime)
-        XCTAssertNil(response.soulMtime)
-        XCTAssertNil(response.projectContext)
-        XCTAssertNil(response.projectContextName)
-        XCTAssertNil(response.projectContextPath)
-        XCTAssertNil(response.projectContextWorkspace)
-        XCTAssertNil(response.projectContextMtime)
-        XCTAssertNil(response.projectContextShadowed)
-        XCTAssertNil(response.externalNotesEnabled)
     }
 
-    func testMemoryDecodesProjectContextShadowedBooleanShape() async throws {
-        // The API docs describe project_context_shadowed as a boolean flag even though
-        // upstream currently sends a list; both shapes must decode.
+    func testMemoryWriteUsesNativeProfilePath() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/memory")
-
-            return apiTestJSONResponse("""
-            {
-              "project_context": "# Project",
-              "project_context_shadowed": true
+            switch request.url?.path {
+            case "/api/profiles":
+                return apiTestJSONResponse(#"{"profiles":[{"name":"default","path":"/opt/data","is_default":true}]}"#, for: request)
+            case "/api/profiles/active":
+                return apiTestJSONResponse(#"{"active":"default"}"#, for: request)
+            case "/api/fs/write-text":
+                XCTAssertEqual(request.httpMethod, "POST")
+                let data = try XCTUnwrap(apiTestBodyData(from: request))
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                XCTAssertEqual(body["path"] as? String, "/opt/data/memories/USER.md")
+                XCTAssertEqual(body["content"] as? String, "# Updated profile")
+                return apiTestJSONResponse(#"{"ok":true,"path":"/opt/data/memories/USER.md"}"#, for: request)
+            default:
+                throw URLError(.badURL)
             }
-            """, for: request)
         }
 
-        let response = try await client.memory()
-
-        XCTAssertEqual(response.projectContext, "# Project")
-        XCTAssertEqual(response.projectContextShadowed, true)
-    }
-
-    func testMemoryDecodesEmptyShadowedListAsNotShadowed() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/memory")
-
-            return apiTestJSONResponse("""
-            {
-              "project_context": "# Project",
-              "project_context_shadowed": []
-            }
-            """, for: request)
-        }
-
-        let response = try await client.memory()
-
-        XCTAssertEqual(response.projectContextShadowed, false)
-    }
-
-    func testMemoryToleratesNullAndUnexpectedShadowedShapes() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/memory")
-
-            return apiTestJSONResponse("""
-            {
-              "project_context": "# Project",
-              "project_context_shadowed": null,
-              "external_notes_enabled": "yes"
-            }
-            """, for: request)
-        }
-
-        let response = try await client.memory()
-
-        XCTAssertNil(response.projectContextShadowed)
-        XCTAssertNil(response.externalNotesEnabled)
-    }
-
-    func testMemoryWriteBuildsExpectedPathBodyAndDecodesResponse() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/memory/write")
-            XCTAssertEqual(request.httpMethod, "POST")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
-
-            let data = try XCTUnwrap(apiTestBodyData(from: request))
-            let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            XCTAssertEqual(body?["section"] as? String, "user")
-            XCTAssertEqual(body?["content"] as? String, "# Profile\n\n- Updated from iOS")
-
-            return apiTestJSONResponse("""
-            {
-              "ok": true,
-              "section": "user",
-              "path": "/Users/test/.hermes/memories/USER.md",
-              "unexpected": "ignored"
-            }
-            """, for: request)
-        }
-
-        let response = try await client.writeMemory(section: .user, content: "# Profile\n\n- Updated from iOS")
+        let response = try await client.writeMemory(section: .user, content: "# Updated profile")
 
         XCTAssertEqual(response.ok, true)
         XCTAssertEqual(response.section, .user)
-        XCTAssertEqual(response.path, "/Users/test/.hermes/memories/USER.md")
-    }
-
-    func testMemoryWriteToleratesMissingFieldsAndUnknownSection() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/memory/write")
-
-            return apiTestJSONResponse("""
-            {
-              "section": "future"
-            }
-            """, for: request)
-        }
-
-        let response = try await client.writeMemory(section: .soul, content: "# Soul")
-
-        XCTAssertNil(response.ok)
-        XCTAssertNil(response.section)
-        XCTAssertNil(response.path)
+        XCTAssertEqual(response.path, "/opt/data/memories/USER.md")
     }
 }

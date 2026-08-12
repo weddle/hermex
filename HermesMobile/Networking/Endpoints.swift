@@ -47,6 +47,8 @@ enum Endpoint {
     case cronDeliveryOptions
     case memory
     case memoryWrite
+    case memoryFile(path: String)
+    case memoryFileWrite
     case skills
     case skillContent(name: String, file: String?)
     case toggleSkill
@@ -143,7 +145,11 @@ enum Endpoint {
         case .memory:
             return "/api/memory"
         case .memoryWrite:
-            return "/api/memory/write"
+            return "/api/fs/write-text"
+        case .memoryFile:
+            return "/api/fs/read-text"
+        case .memoryFileWrite:
+            return "/api/fs/write-text"
         case .skills:
             return "/api/skills"
         case .skillContent:
@@ -193,7 +199,7 @@ enum Endpoint {
             return [URLQueryItem(name: "path", value: path)]
         case let .workspaceSuggestions(prefix):
             return [URLQueryItem(name: "path", value: prefix)]
-        case let .file(path), let .rawFile(path):
+        case let .file(path), let .rawFile(path), let .memoryFile(path):
             return [URLQueryItem(name: "path", value: path)]
         case let .media(path):
             return [URLQueryItem(name: "path", value: path)]

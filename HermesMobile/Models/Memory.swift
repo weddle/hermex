@@ -45,6 +45,42 @@ struct MemoryResponse: Decodable, Equatable {
         case externalNotesEnabled
     }
 
+    init(
+        memory: String? = nil,
+        user: String? = nil,
+        soul: String? = nil,
+        memoryPath: String? = nil,
+        userPath: String? = nil,
+        soulPath: String? = nil,
+        memoryMtime: Double? = nil,
+        userMtime: Double? = nil,
+        soulMtime: Double? = nil,
+        projectContext: String? = nil,
+        projectContextName: String? = nil,
+        projectContextPath: String? = nil,
+        projectContextWorkspace: String? = nil,
+        projectContextMtime: Double? = nil,
+        projectContextShadowed: Bool? = nil,
+        externalNotesEnabled: Bool? = nil
+    ) {
+        self.memory = memory
+        self.user = user
+        self.soul = soul
+        self.memoryPath = memoryPath
+        self.userPath = userPath
+        self.soulPath = soulPath
+        self.memoryMtime = memoryMtime
+        self.userMtime = userMtime
+        self.soulMtime = soulMtime
+        self.projectContext = projectContext
+        self.projectContextName = projectContextName
+        self.projectContextPath = projectContextPath
+        self.projectContextWorkspace = projectContextWorkspace
+        self.projectContextMtime = projectContextMtime
+        self.projectContextShadowed = projectContextShadowed
+        self.externalNotesEnabled = externalNotesEnabled
+    }
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         memory = try container.decodeIfPresent(String.self, forKey: .memory)
@@ -89,6 +125,13 @@ struct MemoryWriteResponse: Decodable, Equatable {
         case section
         case path
         case error
+    }
+
+    init(ok: Bool?, section: MemorySection?, path: String?, error: String?) {
+        self.ok = ok
+        self.section = section
+        self.path = path
+        self.error = error
     }
 
     init(from decoder: Decoder) throws {
