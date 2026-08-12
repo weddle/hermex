@@ -98,9 +98,6 @@ final class AuthManager {
 
     private func testConnection(client: any AuthAPIClient) async throws -> AuthStatusResponse {
         let health = try await client.health()
-        guard health.status == "ok" else {
-            throw APIError.http(statusCode: 200, body: "Unexpected health status.")
-        }
 
         // Native `/api/status` carries the auth contract: `auth_required` and the
         // advertised `auth_providers`. A basic provider is the password path we

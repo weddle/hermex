@@ -159,7 +159,7 @@ final class MockAuthAPIClient: AuthAPIClient, @unchecked Sendable {
             authProviders = nil
         }
         return HealthResponse(
-            status: "ok",
+            status: nil,
             sessions: nil,
             activeStreams: nil,
             uptimeSeconds: nil,

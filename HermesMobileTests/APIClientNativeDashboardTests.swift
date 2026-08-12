@@ -18,14 +18,14 @@ final class APIClientNativeDashboardTests: APIClientTestCase {
         let client = makeClient { request in
             requestedPath = request.url?.path
             return apiTestJSONResponse("""
-            {"status": "ok", "auth_required": true, "auth_providers": ["basic"]}
+            {"auth_required": true, "auth_providers": ["basic"]}
             """, for: request)
         }
 
         let health = try await client.health()
 
         XCTAssertEqual(requestedPath, "/api/status")
-        XCTAssertEqual(health.status, "ok")
+        XCTAssertNil(health.status)
         XCTAssertEqual(health.authRequired, true)
         XCTAssertEqual(health.authProviders, ["basic"])
     }
