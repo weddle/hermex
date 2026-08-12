@@ -18,7 +18,7 @@ final class TranscriptMediaPreviewViewModelTests: XCTestCase {
         let client = makeClient { request in
             recorder.record(request)
             XCTAssertEqual(request.httpMethod, "GET")
-            XCTAssertEqual(request.url?.path, "/api/media")
+            XCTAssertEqual(request.url?.path, "/api/files/download")
             return self.response(statusCode: 200, data: imageData, for: request)
         }
         let viewModel = TranscriptMediaPreviewViewModel(
@@ -40,7 +40,7 @@ final class TranscriptMediaPreviewViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.canExportMedia)
 
         let queryItems = queryItems(for: try XCTUnwrap(recorder.firstURL))
-        XCTAssertEqual(queryItems["session_id"], sessionID)
+        XCTAssertNil(queryItems["session_id"])
         XCTAssertEqual(queryItems["path"], mediaPath)
 
         let originalData = try await viewModel.originalImageData()
@@ -82,7 +82,7 @@ final class TranscriptMediaPreviewViewModelTests: XCTestCase {
 
         XCTAssertNil(viewModel.errorMessage)
         let queryItems = queryItems(for: try XCTUnwrap(recorder.firstURL))
-        XCTAssertEqual(queryItems["session_id"], sessionID)
+        XCTAssertNil(queryItems["session_id"])
         XCTAssertEqual(queryItems["path"], "/tmp/final chart.png")
 
         let payload = try await viewModel.exportPayload()
@@ -208,7 +208,7 @@ final class TranscriptMediaPreviewViewModelTests: XCTestCase {
         let client = makeClient { request in
             recorder.record(request)
             XCTAssertEqual(request.httpMethod, "GET")
-            XCTAssertEqual(request.url?.path, "/api/media")
+            XCTAssertEqual(request.url?.path, "/api/files/download")
             return self.response(statusCode: 200, data: videoData, for: request)
         }
         let viewModel = TranscriptMediaPreviewViewModel(
@@ -242,7 +242,7 @@ final class TranscriptMediaPreviewViewModelTests: XCTestCase {
         XCTAssertTrue(payload.isVideo)
 
         let queryItems = queryItems(for: try XCTUnwrap(recorder.firstURL))
-        XCTAssertEqual(queryItems["session_id"], sessionID)
+        XCTAssertNil(queryItems["session_id"])
         XCTAssertEqual(queryItems["path"], mediaPath)
         XCTAssertEqual(recorder.requestCount, 1)
 

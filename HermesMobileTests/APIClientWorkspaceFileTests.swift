@@ -8,23 +8,18 @@ import UniformTypeIdentifiers
 
 final class APIClientWorkspaceFileTests: APIClientTestCase {
     func testProjectsBuildsExpectedPathAndDecodesProjectList() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/projects")
-            XCTAssertNil(request.httpBody)
-
-            return apiTestJSONResponse("""
-            {
-              "projects": [
-                {
-                  "project_id": "proj123",
-                  "name": "Client Work",
-                  "color": "#336699",
-                  "created_at": 1770000000
-                }
-              ]
-            }
-            """, for: request)
-        }
+        let frames = LockedStringList()
+        let client = makeGatewayClient(
+            handler: { request in
+                XCTAssertEqual(request.url?.path, "/api/auth/ws-ticket")
+                XCTAssertEqual(request.httpMethod, "POST")
+                return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+            },
+            frames: frames,
+            responses: [
+                "projects.tree": ##"{"projects":[{"id":"proj123","label":"Client Work","color":"#336699","created_at":1770000000}]}"##
+            ]
+        )
 
         let response = try await client.projects()
         let project = try XCTUnwrap(response.projects?.first)
@@ -33,57 +28,67 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
         XCTAssertEqual(project.name, "Client Work")
         XCTAssertEqual(project.color, "#336699")
         XCTAssertEqual(project.createdAt, 1_770_000_000)
+
+        // The gateway RPC rides the test-transport socket: assert the exact
+        // projects.tree method and its preview_limit param.
+        let frame = try XCTUnwrap(frames.all.first)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any])
+        XCTAssertEqual(json["method"] as? String, "projects.tree")
+        let params = try XCTUnwrap(json["params"] as? [String: Any])
+        XCTAssertEqual(params["preview_limit"] as? Int, 3)
     }
 
     func testProjectsToleratesLossyProjectFields() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/projects")
-
-            return apiTestJSONResponse("""
-            {
-              "projects": [
+        let frames = LockedStringList()
+        let client = makeGatewayClient(
+            handler: { request in
+                XCTAssertEqual(request.url?.path, "/api/auth/ws-ticket")
+                return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+            },
+            frames: frames,
+            responses: [
+                "projects.tree": """
                 {
-                  "project_id": 123,
-                  "name": true,
-                  "color": 456,
-                  "created_at": "1770000000"
+                  "projects": [
+                    {"id": "proj123", "label": "Client Work", "color": "#336699", "created_at": 1770000000},
+                    {"id": 123, "label": true, "color": 456, "created_at": "1770000000"}
+                  ]
                 }
-              ]
-            }
-            """, for: request)
-        }
+                """
+            ]
+        )
 
         let response = try await client.projects()
-        let project = try XCTUnwrap(response.projects?.first)
 
-        XCTAssertEqual(project.projectId, "123")
-        XCTAssertEqual(project.name, "true")
-        XCTAssertEqual(project.color, "456")
+        // The first node decodes fully via the native tree mapping (label → name).
+        let project = try XCTUnwrap(response.projects?.first)
+        XCTAssertEqual(project.projectId, "proj123")
+        XCTAssertEqual(project.name, "Client Work")
+        XCTAssertEqual(project.color, "#336699")
         XCTAssertEqual(project.createdAt, 1_770_000_000)
+
+        // A node whose fields are the wrong type must not crash the whole list;
+        // native `GatewayValue` coercion degrades those fields to nil.
+        XCTAssertEqual(response.projects?.count, 2)
+        let lossy = try XCTUnwrap(response.projects?[1])
+        XCTAssertNil(lossy.projectId)
+        XCTAssertNil(lossy.name)
+        XCTAssertNil(lossy.color)
+        XCTAssertNil(lossy.createdAt)
     }
 
     func testCreateProjectBuildsExpectedBodyAndDecodesCreatedProject() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/projects/create")
-
-            let body = try XCTUnwrap(apiTestBodyData(from: request))
-            let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
-            XCTAssertEqual(json?["name"] as? String, "Client Work")
-            XCTAssertEqual(json?["color"] as? String, "#7cb9ff")
-
-            return apiTestJSONResponse("""
-            {
-              "ok": true,
-              "project": {
-                "project_id": "proj123",
-                "name": "Client Work",
-                "color": "#7cb9ff",
-                "profile": "default",
-                "created_at": 1770000000
-              }
-            }
-            """, for: request)
-        }
+        let frames = LockedStringList()
+        let client = makeGatewayClient(
+            handler: { request in
+                XCTAssertEqual(request.url?.path, "/api/auth/ws-ticket")
+                return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+            },
+            frames: frames,
+            responses: [
+                "projects.create": ##"{"project":{"id":"proj123","name":"Client Work","color":"#7cb9ff","created_at":1770000000}}"##
+            ]
+        )
 
         let response = try await client.createProject(name: "Client Work", color: "#7cb9ff")
         let project = try XCTUnwrap(response.project)
@@ -93,32 +98,31 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
         XCTAssertEqual(project.name, "Client Work")
         XCTAssertEqual(project.color, "#7cb9ff")
         XCTAssertEqual(project.createdAt, 1_770_000_000)
+
+        // Assert the projects.create RPC body (name + path-based folders contract).
+        let frame = try XCTUnwrap(frames.all.first)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any])
+        XCTAssertEqual(json["method"] as? String, "projects.create")
+        let params = try XCTUnwrap(json["params"] as? [String: Any])
+        XCTAssertEqual(params["name"] as? String, "Client Work")
+        XCTAssertEqual(params["folders"] as? [String], [])
+        XCTAssertEqual(params["primary_path"] as? String, "")
+        XCTAssertEqual(params["use"] as? Bool, true)
+        XCTAssertNil(params["color"])
     }
 
     func testRenameProjectBuildsExpectedBodyAndDecodesRenamedProject() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/projects/rename")
-
-            let body = try XCTUnwrap(apiTestBodyData(from: request))
-            let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
-            XCTAssertEqual(json?["project_id"] as? String, "proj123")
-            XCTAssertEqual(json?["name"] as? String, "Client Archive")
-            XCTAssertEqual(json?["color"] as? String, "#f5c542")
-            XCTAssertNil(json?["projectId"])
-
-            return apiTestJSONResponse("""
-            {
-              "ok": true,
-              "project": {
-                "project_id": "proj123",
-                "name": "Client Archive",
-                "color": "#f5c542",
-                "created_at": "1770000000",
-                "unexpected": "ignored"
-              }
-            }
-            """, for: request)
-        }
+        let frames = LockedStringList()
+        let client = makeGatewayClient(
+            handler: { request in
+                XCTAssertEqual(request.url?.path, "/api/auth/ws-ticket")
+                return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+            },
+            frames: frames,
+            responses: [
+                "projects.update": ##"{"project":{"id":"proj123","name":"Client Archive","color":"#f5c542","created_at":1770000000}}"##
+            ]
+        )
 
         let response = try await client.renameProject(id: "proj123", name: "Client Archive", color: "#f5c542")
         let project = try XCTUnwrap(response.project)
@@ -128,64 +132,83 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
         XCTAssertEqual(project.name, "Client Archive")
         XCTAssertEqual(project.color, "#f5c542")
         XCTAssertEqual(project.createdAt, 1_770_000_000)
+
+        // Assert the projects.update RPC body: id + optional name/color.
+        let frame = try XCTUnwrap(frames.all.first)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any])
+        XCTAssertEqual(json["method"] as? String, "projects.update")
+        let params = try XCTUnwrap(json["params"] as? [String: Any])
+        XCTAssertEqual(params["id"] as? String, "proj123")
+        XCTAssertEqual(params["name"] as? String, "Client Archive")
+        XCTAssertEqual(params["color"] as? String, "#f5c542")
+        XCTAssertNil(params["project_id"])
     }
 
     func testRenameProjectOmitsColorWhenNil() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/projects/rename")
-
-            let body = try XCTUnwrap(apiTestBodyData(from: request))
-            let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
-            XCTAssertEqual(json?["project_id"] as? String, "proj123")
-            XCTAssertEqual(json?["name"] as? String, "Client Archive")
-            XCTAssertNil(json?["color"])
-
-            return apiTestJSONResponse("""
-            {
-              "ok": true,
-              "project": {
-                "project_id": "proj123",
-                "name": "Client Archive"
-              }
-            }
-            """, for: request)
-        }
+        let frames = LockedStringList()
+        let client = makeGatewayClient(
+            handler: { request in
+                XCTAssertEqual(request.url?.path, "/api/auth/ws-ticket")
+                return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+            },
+            frames: frames,
+            responses: [
+                "projects.update": #"{"project":{"id":"proj123","name":"Client Archive"}}"#
+            ]
+        )
 
         let response = try await client.renameProject(id: "proj123", name: "Client Archive", color: nil)
 
         XCTAssertEqual(response.ok, true)
         XCTAssertEqual(response.project?.projectId, "proj123")
+        XCTAssertEqual(response.project?.name, "Client Archive")
         XCTAssertNil(response.project?.color)
+
+        // A nil color must not be sent on the projects.update wire.
+        let frame = try XCTUnwrap(frames.all.first)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any])
+        XCTAssertEqual(json["method"] as? String, "projects.update")
+        let params = try XCTUnwrap(json["params"] as? [String: Any])
+        XCTAssertEqual(params["id"] as? String, "proj123")
+        XCTAssertEqual(params["name"] as? String, "Client Archive")
+        XCTAssertNil(params["color"])
     }
 
     func testDeleteProjectBuildsExpectedBodyAndDecodesResponse() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/projects/delete")
-
-            let body = try XCTUnwrap(apiTestBodyData(from: request))
-            let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
-            XCTAssertEqual(json?["project_id"] as? String, "proj123")
-            XCTAssertNil(json?["projectId"])
-
-            return apiTestJSONResponse(#"{"ok": true}"#, for: request)
-        }
+        let frames = LockedStringList()
+        let client = makeGatewayClient(
+            handler: { request in
+                XCTAssertEqual(request.url?.path, "/api/auth/ws-ticket")
+                return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+            },
+            frames: frames,
+            responses: [
+                "projects.delete": #"{"ok":true}"#
+            ]
+        )
 
         let response = try await client.deleteProject(id: "proj123")
 
         XCTAssertEqual(response.ok, true)
         XCTAssertNil(response.project)
+
+        // Assert the projects.delete RPC carries the project id.
+        let frame = try XCTUnwrap(frames.all.first)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any])
+        XCTAssertEqual(json["method"] as? String, "projects.delete")
+        let params = try XCTUnwrap(json["params"] as? [String: Any])
+        XCTAssertEqual(params["id"] as? String, "proj123")
+        XCTAssertNil(params["project_id"])
     }
 
     func testWorkspacesDecodesWorkspaceObjects() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/workspaces")
+            XCTAssertEqual(request.url?.path, "/api/fs/default-cwd")
+            XCTAssertEqual(request.httpMethod, "GET")
 
             return apiTestJSONResponse("""
             {
-              "workspaces": [
-                {"path": "/Users/test/project", "name": "Project"}
-              ],
-              "last": "/Users/test/project"
+              "cwd": "/Users/test/project"
             }
             """, for: request)
         }
@@ -194,43 +217,38 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
 
         XCTAssertEqual(response.last, "/Users/test/project")
         XCTAssertEqual(response.workspaces?.first?.path, "/Users/test/project")
-        XCTAssertEqual(response.workspaces?.first?.name, "Project")
+        XCTAssertNil(response.workspaces?.first?.name)
     }
 
-    func testWorkspacesToleratesLegacyStringEntries() async throws {
+    func testWorkspacesToleratesMissingCwd() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/workspaces")
+            XCTAssertEqual(request.url?.path, "/api/fs/default-cwd")
 
-            return apiTestJSONResponse("""
-            {
-              "workspaces": ["/Users/test/project"],
-              "last": null
-            }
-            """, for: request)
+            return apiTestJSONResponse(#"{}"#, for: request)
         }
 
         let response = try await client.workspaces()
 
-        XCTAssertEqual(response.workspaces?.first?.path, "/Users/test/project")
-        XCTAssertNil(response.workspaces?.first?.name)
+        XCTAssertNil(response.workspaces)
+        XCTAssertNil(response.last)
     }
 
     func testWorkspaceSuggestionsBuildsExpectedQueryAndDecodesResponse() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/workspaces/suggest")
+            XCTAssertEqual(request.url?.path, "/api/fs/list")
             XCTAssertEqual(request.httpMethod, "GET")
 
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
-            XCTAssertEqual(query["prefix"], "/Users/test/pro")
+            XCTAssertEqual(query["path"], "/Users/test/pro")
 
             return apiTestJSONResponse("""
             {
-              "suggestions": [
-                "/Users/test/project",
-                "/Users/test/prototypes"
+              "entries": [
+                {"name": "project", "path": "/Users/test/project", "type": "dir"},
+                {"name": "prototypes", "path": "/Users/test/prototypes", "type": "dir"}
               ],
-              "prefix": "/Users/test/pro"
+              "path": "/Users/test/pro"
             }
             """, for: request)
         }
@@ -562,6 +580,49 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
         XCTAssertEqual(payload.filename, "archive.zip")
         XCTAssertEqual(payload.contentType, UTType.zip)
         XCTAssertFalse(payload.isImage)
-        XCTAssertEqual(requestedPaths, ["/api/file/raw"])
+        XCTAssertEqual(requestedPaths, ["/api/files/download"])
+    }
+
+    // MARK: - Gateway test helpers
+
+    /// Builds an `APIClient` whose `withGatewayConnection` uses a test-transport
+    /// `HermesGatewayClient` (via the `gatewayFabricator` seam): the websocket
+    /// handshake completes instantly and each JSON-RPC frame is captured on
+    /// `frames`, then delivered a canned `result` per method. The `handler`
+    /// still serves the `POST /api/auth/ws-ticket` mint through `MockURLProtocol`.
+    private func makeGatewayClient(
+        handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data),
+        frames: LockedStringList,
+        responses: [String: String],
+        lastResult: String = #"{}"#
+    ) -> APIClient {
+        MockURLProtocol.requestHandler = handler
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let baseURL = URL(string: "https://example.test")!
+
+        return APIClient(
+            baseURL: baseURL,
+            session: session,
+            gatewayFabricator: { _, ticket, profile, headers in
+                let gateway = HermesGatewayClient(
+                    baseURL: baseURL,
+                    ticket: ticket,
+                    profile: profile,
+                    customHeaders: headers
+                )
+                gateway.testSendFrame = { frame in
+                    frames.append(frame)
+                    guard let json = try? JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any],
+                          let id = json["id"] as? Int,
+                          let method = json["method"] as? String else { return }
+                    let result = responses[method] ?? lastResult
+                    gateway.testDeliverFrame(#"{"jsonrpc":"2.0","id":\#(id),"result":\#(result)}"#)
+                }
+                return gateway
+            }
+        )
     }
 }

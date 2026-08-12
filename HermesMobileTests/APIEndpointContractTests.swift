@@ -193,7 +193,10 @@ final class APINativeContractReadinessTests: XCTestCase {
             XCTAssertEqual(request.httpMethod, "POST")
             XCTAssertNil(request.value(forHTTPHeaderField: "Origin"))
             XCTAssertNil(request.value(forHTTPHeaderField: "Referer"))
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+            // `pauseCron` with no reason sends an empty mutation: no JSON body and
+            // therefore no Content-Type header from the native client.
+            XCTAssertNil(request.value(forHTTPHeaderField: "Content-Type"))
+            XCTAssertNil(apiTestBodyData(from: request))
 
             return apiTestJSONResponse("""
             {"ok": true}
@@ -211,15 +214,20 @@ final class APINativeContractReadinessTests: XCTestCase {
             XCTAssertEqual(request.httpMethod, "POST")
             XCTAssertNil(request.value(forHTTPHeaderField: "Origin"))
             XCTAssertNil(request.value(forHTTPHeaderField: "Referer"))
-            XCTAssertTrue(request.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("multipart/form-data") == true)
+            // Native uploads POST a JSON data_url body (not browser multipart), so
+            // the request carries the JSON content type, never a multipart boundary.
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
 
             return apiTestJSONResponse("""
             {
-              "filename": "contract.txt",
+              "ok": true,
               "path": "/tmp/workspace/contract.txt",
-              "size": 8,
-              "mime": "text/plain",
-              "is_image": false
+              "entry": {
+                "name": "contract.txt",
+                "path": "/tmp/workspace/contract.txt",
+                "size": 8,
+                "mime_type": "text/plain"
+              }
             }
             """, for: request)
         }
@@ -227,6 +235,9 @@ final class APINativeContractReadinessTests: XCTestCase {
         let response = try await client.uploadFile(sessionID: "abc123", data: Data("contract".utf8), filename: "contract.txt")
 
         XCTAssertEqual(response.filename, "contract.txt")
+        XCTAssertEqual(response.path, "/tmp/workspace/contract.txt")
+        XCTAssertEqual(response.size, 8)
+        XCTAssertEqual(response.mime, "text/plain")
     }
 
     private func makeClient(

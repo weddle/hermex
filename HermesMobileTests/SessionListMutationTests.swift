@@ -251,10 +251,12 @@ final class SessionListMutationTests: XCTestCase {
 
         await viewModel.load(modelContext: context)
 
+        // The native row decoder has no `active_stream_id` or
+        // `has_pending_user_message` columns, so the `streaming-untitled` and
+        // `pending-untitled` empty rows are treated as plain placeholders and
+        // filtered out. The contentful, worktree-backed, and titled rows stay.
         let expectedIDs = [
             "contentful-untitled",
-            "streaming-untitled",
-            "pending-untitled",
             "worktree-untitled",
             "named-empty"
         ]
@@ -298,95 +300,111 @@ final class SessionListMutationTests: XCTestCase {
     }
 
     @MainActor
-    func testCreateSessionReturnsEmptyPlaceholderWithoutInsertingIntoSessionList() async throws {
+    func testCreateSessionInsertsReturnedRowWithoutFullSessionListReload() async throws {
         let context = try makeContext()
         let serverURL = try XCTUnwrap(URL(string: "https://example.test"))
         var requestedPaths: [String] = []
-        let viewModel = try makeViewModel { request in
-            let path = request.url?.path
-            requestedPaths.append(path ?? "nil")
+        let frames = LockedStringList()
+        let viewModel = try makeGatewayViewModel(
+            handler: { request in
+                let path = request.url?.path
+                requestedPaths.append(path ?? "nil")
 
-            switch path {
-            case "/api/workspaces":
-                return apiTestJSONResponse("""
-                {
-                  "workspaces": [
-                    {"path": "/tmp/workspace", "name": "Workspace"}
-                  ],
-                  "last": "/tmp/workspace"
+                switch path {
+                case "/api/fs/default-cwd":
+                    return apiTestJSONResponse("""
+                    {
+                      "cwd": "/tmp/workspace"
+                    }
+                    """, for: request)
+                case "/api/auth/ws-ticket":
+                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+                case "/api/sessions/new-123":
+                    return apiTestJSONResponse("""
+                    {
+                      "session_id": "new-123",
+                      "title": "Untitled Session",
+                      "cwd": "/tmp/workspace",
+                      "updated_at": 1770000000,
+                      "last_activity_at": 1770000000,
+                      "archived": false
+                    }
+                    """, for: request)
+                case "/api/sessions":
+                    XCTFail("New-chat creation should not block on a full session-list reload.")
+                    throw URLError(.badURL)
+                default:
+                    XCTFail("Unexpected request path: \(path ?? "nil")")
+                    throw URLError(.badURL)
                 }
-                """, for: request)
-            case "/api/session/new":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["workspace"] as? String, "/tmp/workspace")
-                XCTAssertNil(body["model"] as? String)
-                XCTAssertNil(body["model_provider"] as? String)
-                XCTAssertNil(body["profile"] as? String)
-
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "new-123",
-                    "title": "Untitled Session",
-                    "workspace": "/tmp/workspace",
-                    "updated_at": 1770000000,
-                    "last_message_at": 1770000000,
-                    "archived": false
-                  }
-                }
-                """, for: request)
-            case "/api/sessions":
-                XCTFail("New-chat creation should not block on a full session-list reload.")
-                throw URLError(.badURL)
-            default:
-                XCTFail("Unexpected request path: \(path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
+            },
+            frames: frames,
+            responses: [
+                "session.create": #"{"session_id":"new-123"}"#
+            ]
+        )
 
         let created = await viewModel.createSession(modelContext: context)
 
         XCTAssertEqual(created?.sessionId, "new-123")
-        XCTAssertTrue(viewModel.sessions.isEmpty)
-        XCTAssertTrue(try CacheStore.cachedSessions(serverURL: serverURL, in: context).isEmpty)
-        XCTAssertEqual(requestedPaths, ["/api/workspaces", "/api/session/new"])
+        // The created row has a worktree `cwd`, so it is not an empty placeholder;
+        // the migrated app inserts it into the in-memory list and the cache.
+        XCTAssertEqual(viewModel.sessions.map(\.sessionId), ["new-123"])
+        XCTAssertEqual(try CacheStore.cachedSessions(serverURL: serverURL, in: context).map(\.sessionId), ["new-123"])
+        XCTAssertEqual(
+            requestedPaths,
+            ["/api/fs/default-cwd", "/api/auth/ws-ticket", "/api/sessions/new-123"]
+        )
         XCTAssertFalse(viewModel.isCreatingSession)
         XCTAssertNil(viewModel.actionErrorMessage)
         XCTAssertNil(viewModel.lastError)
+
+        // Assert the session.create RPC carries the resolved workspace as `cwd`.
+        let frame = try XCTUnwrap(frames.all.first)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any])
+        XCTAssertEqual(json["method"] as? String, "session.create")
+        let params = try XCTUnwrap(json["params"] as? [String: Any])
+        XCTAssertEqual(params["cwd"] as? String, "/tmp/workspace")
+        XCTAssertNil(params["model"])
+        XCTAssertNil(params["provider"])
     }
 
     @MainActor
     func testCreateSessionKeepsWorktreeBackedUntitledSessionWithoutCounts() async throws {
         let context = try makeContext()
         let serverURL = try XCTUnwrap(URL(string: "https://example.test"))
-        let viewModel = try makeViewModel { request in
-            switch request.url?.path {
-            case "/api/workspaces":
-                return apiTestJSONResponse("""
-                {
-                  "workspaces": [
-                    {"path": "/tmp/workspace", "name": "Workspace"}
-                  ],
-                  "last": "/tmp/workspace"
+        let frames = LockedStringList()
+        let viewModel = try makeGatewayViewModel(
+            handler: { request in
+                switch request.url?.path {
+                case "/api/fs/default-cwd":
+                    return apiTestJSONResponse("""
+                    {
+                      "cwd": "/tmp/workspace"
+                    }
+                    """, for: request)
+                case "/api/auth/ws-ticket":
+                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+                case "/api/sessions/worktree-new":
+                    return apiTestJSONResponse("""
+                    {
+                      "session_id": "worktree-new",
+                      "title": "Untitled Session",
+                      "cwd": "/tmp/workspace",
+                      "worktree_path": "/tmp/hermes-worktree",
+                      "archived": false
+                    }
+                    """, for: request)
+                default:
+                    XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                    throw URLError(.badURL)
                 }
-                """, for: request)
-            case "/api/session/new":
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "worktree-new",
-                    "title": "Untitled Session",
-                    "workspace": "/tmp/workspace",
-                    "worktree_path": "/tmp/hermes-worktree",
-                    "archived": false
-                  }
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
+            },
+            frames: frames,
+            responses: [
+                "session.create": #"{"session_id":"worktree-new"}"#
+            ]
+        )
 
         let created = await viewModel.createSession(modelContext: context)
 
@@ -396,6 +414,8 @@ final class SessionListMutationTests: XCTestCase {
             try CacheStore.cachedSessions(serverURL: serverURL, in: context).compactMap(\.sessionId),
             ["worktree-new"]
         )
+        XCTAssertNil(viewModel.actionErrorMessage)
+        XCTAssertNil(viewModel.lastError)
     }
 
     @MainActor
@@ -408,7 +428,6 @@ final class SessionListMutationTests: XCTestCase {
             case "/api/profiles":
                 return apiTestJSONResponse("""
                 {
-                  "active": "work",
                   "profiles": [
                     {
                       "name": "default",
@@ -424,6 +443,12 @@ final class SessionListMutationTests: XCTestCase {
                   ]
                 }
                 """, for: request)
+            case "/api/profiles/active":
+                return apiTestJSONResponse("""
+                {
+                  "active": "work"
+                }
+                """, for: request)
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
@@ -432,7 +457,7 @@ final class SessionListMutationTests: XCTestCase {
 
         await viewModel.loadActiveProfile()
 
-        XCTAssertEqual(requestedPaths, ["/api/profiles"])
+        XCTAssertEqual(requestedPaths, ["/api/profiles", "/api/profiles/active"])
         XCTAssertEqual(viewModel.activeProfileName, "work")
         XCTAssertEqual(viewModel.activeProfileDisplayName, "work")
         XCTAssertEqual(viewModel.activeProfileModel, "claude-sonnet-4-5")
@@ -445,43 +470,18 @@ final class SessionListMutationTests: XCTestCase {
     }
 
     @MainActor
-    func testLoadActiveProfileStoresSingleProfileMode() async throws {
-        let viewModel = try makeViewModel { request in
-            switch request.url?.path {
-            case "/api/profiles":
-                return apiTestJSONResponse("""
-                {
-                  "active": "default",
-                  "profiles": [
-                    { "name": "default", "is_default": true, "is_active": true }
-                  ],
-                  "single_profile_mode": true
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        await viewModel.loadActiveProfile()
-
-        XCTAssertTrue(viewModel.isSingleProfileMode)
-        XCTAssertEqual(viewModel.activeProfileName, "default")
-    }
-
-    @MainActor
     func testLoadActiveProfileCanRefreshChangedProfile() async throws {
-        var profileLoadCount = 0
+        // Native profiles() = GET /api/profiles (list) + GET /api/profiles/active
+        // (sticky active name). Count list fetches to answer each refresh's state.
+        var profileListCount = 0
         let viewModel = try makeViewModel { request in
             switch request.url?.path {
             case "/api/profiles":
-                profileLoadCount += 1
+                profileListCount += 1
 
-                if profileLoadCount == 1 {
+                if profileListCount == 1 {
                     return apiTestJSONResponse("""
                     {
-                      "active": "default",
                       "profiles": [
                         {"name": "default", "is_active": true, "model": "gpt-5", "provider": "openai"},
                         {"name": "work", "model": "claude-sonnet-4-5", "provider": "anthropic"}
@@ -492,12 +492,20 @@ final class SessionListMutationTests: XCTestCase {
 
                 return apiTestJSONResponse("""
                 {
-                  "active": "work",
                   "profiles": [
                     {"name": "default", "model": "gpt-5", "provider": "openai"},
                     {"name": "work", "is_active": true, "model": "claude-sonnet-4-5", "provider": "anthropic"}
                   ]
                 }
+                """, for: request)
+            case "/api/profiles/active":
+                if profileListCount == 1 {
+                    return apiTestJSONResponse("""
+                    {"active": "default"}
+                    """, for: request)
+                }
+                return apiTestJSONResponse("""
+                {"active": "work"}
                 """, for: request)
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
@@ -510,7 +518,7 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertEqual(viewModel.activeProfileModel, "gpt-5")
 
         await viewModel.loadActiveProfile()
-        XCTAssertEqual(profileLoadCount, 2)
+        XCTAssertEqual(profileListCount, 2)
         XCTAssertEqual(viewModel.activeProfileName, "work")
         XCTAssertEqual(viewModel.activeProfileDisplayName, "work")
         XCTAssertEqual(viewModel.activeProfileModel, "claude-sonnet-4-5")
@@ -521,33 +529,36 @@ final class SessionListMutationTests: XCTestCase {
     @MainActor
     func testSwitchActiveProfileCallsServerAndUpdatesPickerState() async throws {
         var requestedPaths: [String] = []
+        var requestedMethods: [String] = []
+        var activeName = "default"
         let viewModel = try makeViewModel { request in
             let path = request.url?.path ?? "nil"
+            let method = request.httpMethod ?? "nil"
             requestedPaths.append(path)
+            requestedMethods.append(method)
 
             switch path {
             case "/api/profiles":
                 return apiTestJSONResponse("""
                 {
-                  "active": "default",
                   "profiles": [
                     {"name": "default", "is_active": true, "model": "gpt-5", "provider": "openai"},
                     {"name": "work", "model": "claude-sonnet-4-5", "provider": "anthropic"}
                   ]
                 }
                 """, for: request)
-            case "/api/profile/switch":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["name"] as? String, "work")
-                return apiTestJSONResponse("""
-                {
-                  "active": "work",
-                  "default_model": "claude-sonnet-4-5",
-                  "profiles": [
-                    {"name": "default", "model": "gpt-5", "provider": "openai"},
-                    {"name": "work", "is_active": true, "model": "claude-sonnet-4-5", "provider": "anthropic"}
-                  ]
+            case "/api/profiles/active":
+                if method == "POST" {
+                    let body = try XCTUnwrap(apiTestJSONBody(from: request))
+                    XCTAssertEqual(body["name"] as? String, "work")
+                    activeName = "work"
+                    return apiTestJSONResponse("""
+                    {"ok": true, "active": "work"}
+                    """, for: request)
                 }
+
+                return apiTestJSONResponse("""
+                {"active": "\(activeName)"}
                 """, for: request)
             default:
                 XCTFail("Unexpected request path: \(path)")
@@ -560,7 +571,17 @@ final class SessionListMutationTests: XCTestCase {
         let didSwitch = await viewModel.switchActiveProfile(workProfile)
 
         XCTAssertTrue(didSwitch)
-        XCTAssertEqual(requestedPaths, ["/api/profiles", "/api/profile/switch"])
+        XCTAssertEqual(
+            requestedPaths,
+            [
+                "/api/profiles",            // initial loadActiveProfile list
+                "/api/profiles/active",     // initial loadActiveProfile active
+                "/api/profiles/active",     // switch POST
+                "/api/profiles",            // switch's profiles() list
+                "/api/profiles/active"      // switch's profiles() active
+            ]
+        )
+        XCTAssertTrue(requestedMethods.filter { $0 == "POST" }.contains("POST"))
         XCTAssertEqual(viewModel.activeProfileName, "work")
         XCTAssertEqual(viewModel.activeProfileDisplayName, "work")
         XCTAssertEqual(viewModel.activeProfileModel, "claude-sonnet-4-5")
@@ -578,21 +599,25 @@ final class SessionListMutationTests: XCTestCase {
             case "/api/profiles":
                 return apiTestJSONResponse("""
                 {
-                  "active": "default",
                   "profiles": [
                     {"name": "default", "is_active": true, "model": "gpt-5", "provider": "openai"},
                     {"name": "work", "model": "claude-sonnet-4-5", "provider": "anthropic"}
                   ]
                 }
                 """, for: request)
-            case "/api/profile/switch":
-                let response = HTTPURLResponse(
-                    url: try XCTUnwrap(request.url),
-                    statusCode: 500,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "application/json"]
-                )
-                return (try XCTUnwrap(response), Data(#"{"error":"switch failed"}"#.utf8))
+            case "/api/profiles/active":
+                if request.httpMethod == "POST" {
+                    let response = HTTPURLResponse(
+                        url: try XCTUnwrap(request.url),
+                        statusCode: 500,
+                        httpVersion: nil,
+                        headerFields: ["Content-Type": "application/json"]
+                    )
+                    return (try XCTUnwrap(response), Data(#"{"error":"switch failed"}"#.utf8))
+                }
+                return apiTestJSONResponse("""
+                {"active": "default"}
+                """, for: request)
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
@@ -620,6 +645,14 @@ final class SessionListMutationTests: XCTestCase {
             case "/api/sessions":
                 return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
             case "/api/profiles":
+                return apiTestJSONResponse("""
+                {
+                  "profiles": [
+                    {"name": "default", "is_active": true, "model": "gpt-5", "provider": "openai"}
+                  ]
+                }
+                """, for: request)
+            case "/api/profiles/active":
                 let response = HTTPURLResponse(
                     url: try XCTUnwrap(request.url),
                     statusCode: 500,
@@ -656,18 +689,7 @@ final class SessionListMutationTests: XCTestCase {
             switch path {
             case "/api/sessions":
                 loadCount += 1
-                let activeStreamIDField = loadCount == 1 ? #","active_stream_id":"stream-123""# : ""
-                return apiTestJSONResponse("""
-                {
-                  "sessions": [
-                    {
-                      "session_id": "session-streaming",
-                      "title": "Streaming work",
-                      "archived": false\(activeStreamIDField)
-                    }
-                  ]
-                }
-                """, for: request)
+                return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
             case "/api/chat/stream/status":
                 let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
                 let streamID = components?.queryItems?.first { $0.name == "stream_id" }?.value
@@ -683,13 +705,13 @@ final class SessionListMutationTests: XCTestCase {
         }
 
         await viewModel.load()
-        XCTAssertEqual(viewModel.sessions.first?.activeStreamId, "stream-123")
+        XCTAssertEqual(loadCount, 1)
 
         let refreshResult = await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: ["stream-123"])
 
         XCTAssertEqual(refreshResult, .reloaded)
-        XCTAssertNil(viewModel.sessions.first?.activeStreamId)
         XCTAssertEqual(requestPaths, ["/api/sessions", "/api/chat/stream/status", "/api/sessions"])
+        XCTAssertEqual(loadCount, 2)
     }
 
     @MainActor
@@ -700,18 +722,7 @@ final class SessionListMutationTests: XCTestCase {
             switch request.url?.path {
             case "/api/sessions":
                 loadCount += 1
-                return apiTestJSONResponse("""
-                {
-                  "sessions": [
-                    {
-                      "session_id": "session-streaming",
-                      "title": "Streaming work",
-                      "archived": false,
-                      "active_stream_id": "stream-123"
-                    }
-                  ]
-                }
-                """, for: request)
+                return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
             case "/api/chat/stream/status":
                 statusCount += 1
                 return apiTestJSONResponse(
@@ -730,7 +741,6 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertEqual(refreshResult, .unchanged)
         XCTAssertEqual(loadCount, 1)
         XCTAssertEqual(statusCount, 1)
-        XCTAssertEqual(viewModel.sessions.first?.activeStreamId, "stream-123")
     }
 
     @MainActor
@@ -766,39 +776,47 @@ final class SessionListMutationTests: XCTestCase {
     func testPinArchiveMoveAndDeleteCallServerMutationThenReloadSessions() async throws {
         var loadCount = 0
         var mutationPaths: [String] = []
-        let viewModel = try makeViewModel { request in
-            switch request.url?.path {
-            case "/api/sessions":
-                loadCount += 1
-                return apiTestJSONResponse(self.sessionListJSON(forLoadCount: loadCount), for: request)
-            case "/api/session/pin":
-                mutationPaths.append("/api/session/pin")
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                XCTAssertEqual(body["pinned"] as? Bool, true)
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
-            case "/api/session/archive":
-                mutationPaths.append("/api/session/archive")
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                XCTAssertEqual(body["archived"] as? Bool, true)
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
-            case "/api/session/move":
-                mutationPaths.append("/api/session/move")
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                XCTAssertEqual(body["project_id"] as? String, "project-1")
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
-            case "/api/session/delete":
-                mutationPaths.append("/api/session/delete")
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
+        var mutationMethods: [String] = []
+        let frames = LockedStringList()
+        let viewModel = try makeGatewayViewModel(
+            handler: { request in
+                let path = request.url?.path ?? "nil"
+                mutationPaths.append(path)
+                mutationMethods.append(request.httpMethod ?? "nil")
+
+                switch path {
+                case "/api/sessions":
+                    loadCount += 1
+                    return apiTestJSONResponse(self.sessionListJSON(forLoadCount: loadCount), for: request)
+                case "/api/auth/ws-ticket":
+                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+                case "/api/sessions/session-abc":
+                    return apiTestJSONResponse("""
+                    {
+                      "session_id": "session-abc",
+                      "title": "Planning",
+                      "project_id": "project-1",
+                      "archived": false
+                    }
+                    """, for: request)
+                case "/api/sessions/session-abc/messages":
+                    return apiTestJSONResponse("""
+                    {
+                      "session_id": "session-abc",
+                      "messages": [],
+                      "pagination": {"limit": 50, "returned": 0}
+                    }
+                    """, for: request)
+                default:
+                    XCTFail("Unexpected request path: \(path)")
+                    throw URLError(.badURL)
+                }
+            },
+            frames: frames,
+            responses: [
+                "session.workspace.move": #"{"ok":true}"#
+            ]
+        )
 
         await viewModel.load()
         let session = try XCTUnwrap(viewModel.sessions.first)
@@ -819,9 +837,28 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertTrue(viewModel.sessions.isEmpty)
 
         XCTAssertEqual(loadCount, 5)
+        // pin/archive/delete hit the native REST PATCH/DELETE routes; move rides
+        // the gateway `session.workspace.move` RPC over the test-transport socket.
         XCTAssertEqual(
             mutationPaths,
-            ["/api/session/pin", "/api/session/archive", "/api/session/move", "/api/session/delete"]
+            [
+                "/api/sessions",                       // initial load
+                "/api/sessions/session-abc",           // pin PATCH
+                "/api/sessions",                       // pin follow-up reload
+                "/api/sessions/session-abc",           // archive PATCH
+                "/api/sessions",                       // archive follow-up reload
+                "/api/auth/ws-ticket",                 // move: mint ticket
+                "/api/sessions/session-abc",           // move: post-RPC detail reload
+                "/api/sessions",                       // move: follow-up list reload
+                "/api/sessions/session-abc",           // delete DELETE
+                "/api/sessions"                        // delete follow-up reload
+            ]
+        )
+        XCTAssertTrue(mutationMethods.contains("PATCH"))
+        XCTAssertTrue(mutationMethods.contains("DELETE"))
+        XCTAssertEqual(
+            frames.all.filter { $0.contains("session.workspace.move") }.count,
+            1
         )
         XCTAssertNil(viewModel.actionErrorMessage)
         XCTAssertNil(viewModel.lastError)
@@ -829,73 +866,96 @@ final class SessionListMutationTests: XCTestCase {
 
     func testSessionMutatorDuplicateBranchesThenLoadsReturnedSession() async throws {
         var requestedPaths: [String] = []
-        let client = try makeClient { request in
-            let path = request.url?.path ?? "nil"
-            requestedPaths.append(path)
+        let frames = LockedStringList()
+        let client = makeGatewayClient(
+            handler: { request in
+                let path = request.url?.path ?? "nil"
+                requestedPaths.append(path)
 
-            switch path {
-            case "/api/session/branch":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                XCTAssertEqual(body["title"] as? String, "Planning (copy)")
-                return apiTestJSONResponse(#"{"session_id":"copy-123"}"#, for: request)
-            case "/api/session":
-                XCTAssertEqual(request.url?.query?.contains("session_id=copy-123"), true)
-                return apiTestJSONResponse(
-                    """
+                switch path {
+                case "/api/auth/ws-ticket":
+                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+                case "/api/sessions/copy-123":
+                    return apiTestJSONResponse("""
                     {
-                      "session": {
-                        "session_id": "copy-123",
-                        "title": "Planning (copy)",
-                        "archived": false
-                      }
+                      "session_id": "copy-123",
+                      "title": "Planning (copy)",
+                      "archived": false
                     }
-                    """,
-                    for: request
-                )
-            default:
-                XCTFail("Unexpected request path: \(path)")
-                throw URLError(.badURL)
-            }
-        }
+                    """, for: request)
+                default:
+                    XCTFail("Unexpected request path: \(path)")
+                    throw URLError(.badURL)
+                }
+            },
+            frames: frames,
+            responses: [
+                "session.branch": #"{"session_id":"copy-123","title":"Planning (copy)","parent":"session-abc"}"#
+            ]
+        )
 
         let result = try await SessionMutator(client: client).duplicate(
             sessionID: "session-abc",
             title: "Planning (copy)"
         )
 
-        XCTAssertEqual(requestedPaths, ["/api/session/branch", "/api/session"])
+        XCTAssertEqual(requestedPaths, ["/api/auth/ws-ticket", "/api/sessions/copy-123"])
         XCTAssertEqual(result.session?.sessionId, "copy-123")
         XCTAssertEqual(result.session?.title, "Planning (copy)")
         XCTAssertNil(result.errorMessage)
+
+        // Assert the session.branch RPC body (session id + copy title).
+        let frame = try XCTUnwrap(frames.all.first)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any])
+        XCTAssertEqual(json["method"] as? String, "session.branch")
+        let params = try XCTUnwrap(json["params"] as? [String: Any])
+        XCTAssertEqual(params["session_id"] as? String, "session-abc")
+        XCTAssertEqual(params["name"] as? String, "Planning (copy)")
     }
 
     @MainActor
     func testConcurrentSessionMutationsAreIgnoredWhileSameSessionIsInFlight() async throws {
         let firstPinRequestStarted = expectation(description: "first pin request started")
         let requestCounts = LockedSessionMutationRequestCounts()
-        let viewModel = try makeViewModel { request in
-            switch request.url?.path {
-            case "/api/sessions":
-                let currentLoadCount = requestCounts.incrementLoadCount()
-                return apiTestJSONResponse(self.sessionListJSON(forLoadCount: currentLoadCount), for: request)
-            case "/api/session/pin":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
+        let frames = LockedStringList()
+        let viewModel = try makeGatewayViewModel(
+            handler: { request in
+                switch request.url?.path {
+                case "/api/sessions":
+                    let currentLoadCount = requestCounts.incrementLoadCount()
+                    return apiTestJSONResponse(self.sessionListJSON(forLoadCount: currentLoadCount), for: request)
+                case "/api/sessions/session-abc":
+                    // The one in-flight pin PATCH; the concurrent duplicate/move
+                    // are ignored before any network call, so only the pin's
+                    // PATCH and the post-detail /api/sessions reload hit here.
+                    let body = try XCTUnwrap(apiTestJSONBody(from: request))
+                    XCTAssertEqual(body["pinned"] as? Bool, true)
 
-                let currentPinRequestCount = requestCounts.incrementPinRequestCount()
+                    let currentPinRequestCount = requestCounts.incrementPinRequestCount()
 
-                if currentPinRequestCount == 1 {
-                    firstPinRequestStarted.fulfill()
-                    Thread.sleep(forTimeInterval: 0.2)
+                    if currentPinRequestCount == 1 {
+                        firstPinRequestStarted.fulfill()
+                        Thread.sleep(forTimeInterval: 0.2)
+                    }
+
+                    return apiTestJSONResponse("""
+                    {
+                      "session_id": "session-abc",
+                      "title": "Planning",
+                      "pinned": true,
+                      "archived": false
+                    }
+                    """, for: request)
+                default:
+                    XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                    throw URLError(.badURL)
                 }
-
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
+            },
+            frames: frames,
+            responses: [
+                "session.workspace.move": #"{"ok":true}"#
+            ]
+        )
 
         await viewModel.load()
         let session = try XCTUnwrap(viewModel.sessions.first)
@@ -927,6 +987,9 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertFalse(didSkipDuplicatePin)
         XCTAssertEqual(finalCounts.pinRequestCount, 1)
         XCTAssertEqual(finalCounts.loadCount, 2)
+        // The concurrent duplicate/move were rejected client-side before any
+        // gateway RPC could be issued.
+        XCTAssertTrue(frames.all.isEmpty)
         XCTAssertFalse(viewModel.isMutating(session))
         XCTAssertNil(viewModel.actionErrorMessage)
         XCTAssertNil(viewModel.lastError)
@@ -935,26 +998,26 @@ final class SessionListMutationTests: XCTestCase {
     @MainActor
     func testRenameSessionUpdatesLocalRowAndCachedSession() async throws {
         var requestedPaths: [String] = []
+        var requestedMethods: [String] = []
         let context = try makeContext()
         let server = try XCTUnwrap(URL(string: "https://example.test"))
         let viewModel = try makeViewModel { request in
             let path = request.url?.path ?? "nil"
             requestedPaths.append(path)
+            requestedMethods.append(request.httpMethod ?? "nil")
 
             switch path {
             case "/api/sessions":
                 return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
-            case "/api/session/rename":
+            case "/api/sessions/session-abc":
                 let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
                 XCTAssertEqual(body["title"] as? String, "Launch Notes")
+                XCTAssertNil(body["session_id"])
                 return apiTestJSONResponse("""
                 {
-                  "ok": true,
-                  "session": {
-                    "session_id": "session-abc",
-                    "title": "Launch Notes"
-                  }
+                  "session_id": "session-abc",
+                  "title": "Launch Notes",
+                  "archived": false
                 }
                 """, for: request)
             default:
@@ -969,7 +1032,8 @@ final class SessionListMutationTests: XCTestCase {
         let cachedSessions = try CacheStore.cachedSessions(serverURL: server, in: context)
 
         XCTAssertTrue(didRename)
-        XCTAssertEqual(requestedPaths, ["/api/sessions", "/api/session/rename"])
+        XCTAssertEqual(requestedPaths, ["/api/sessions", "/api/sessions/session-abc"])
+        XCTAssertEqual(requestedMethods, ["GET", "PATCH"])
         XCTAssertEqual(viewModel.sessions.first?.title, "Launch Notes")
         XCTAssertEqual(viewModel.sessions.first?.workspace, session.workspace)
         XCTAssertEqual(cachedSessions.first?.title, "Launch Notes")
@@ -1009,7 +1073,7 @@ final class SessionListMutationTests: XCTestCase {
             switch path {
             case "/api/sessions":
                 return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
-            case "/api/session/rename":
+            case "/api/sessions/session-abc":
                 let response = HTTPURLResponse(
                     url: try XCTUnwrap(request.url),
                     statusCode: 500,
@@ -1029,7 +1093,7 @@ final class SessionListMutationTests: XCTestCase {
         let didRename = await viewModel.rename(session, to: "Launch Notes")
 
         XCTAssertFalse(didRename)
-        XCTAssertEqual(requestedPaths, ["/api/sessions", "/api/session/rename"])
+        XCTAssertEqual(requestedPaths, ["/api/sessions", "/api/sessions/session-abc"])
         XCTAssertEqual(viewModel.sessions, beforeSessions)
         XCTAssertEqual(viewModel.sessions.first?.title, "Planning")
         XCTAssertNotNil(viewModel.actionErrorMessage)
@@ -1071,54 +1135,55 @@ final class SessionListMutationTests: XCTestCase {
     func testCreateProjectThenMovesSessionAndUpdatesLocalLists() async throws {
         var loadCount = 0
         var requestedPaths: [String] = []
-        let viewModel = try await makeViewModel { request in
-            let path = request.url?.path
-            requestedPaths.append(path ?? "")
+        let frames = LockedStringList()
+        let viewModel = try await makeGatewayViewModel(
+            handler: { request in
+                let path = request.url?.path
+                requestedPaths.append(path ?? "")
 
-            switch path {
-            case "/api/sessions":
-                loadCount += 1
-                if loadCount == 1 {
-                    return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
-                }
+                switch path {
+                case "/api/sessions":
+                    loadCount += 1
+                    if loadCount == 1 {
+                        return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
+                    }
 
-                return apiTestJSONResponse("""
-                {
-                  "sessions": [
+                    return apiTestJSONResponse("""
+                    {
+                      "sessions": [
+                        {
+                          "session_id": "session-abc",
+                          "title": "Planning",
+                          "project_id": "project-new",
+                          "archived": false
+                        }
+                      ]
+                    }
+                    """, for: request)
+                case "/api/auth/ws-ticket":
+                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+                case "/api/sessions/session-abc":
+                    return apiTestJSONResponse("""
                     {
                       "session_id": "session-abc",
                       "title": "Planning",
                       "project_id": "project-new",
                       "archived": false
                     }
-                  ]
+                    """, for: request)
+                default:
+                    XCTFail("Unexpected request path: \(path ?? "nil")")
+                    throw URLError(.badURL)
                 }
-                """, for: request)
-            case "/api/projects/create":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["name"] as? String, "Client Work")
-                XCTAssertEqual(body["color"] as? String, "#7cb9ff")
-                return apiTestJSONResponse("""
-                {
-                  "ok": true,
-                  "project": {
-                    "project_id": "project-new",
-                    "name": "Client Work",
-                    "color": "#7cb9ff",
-                    "created_at": 1770000000
-                  }
-                }
-                """, for: request)
-            case "/api/session/move":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                XCTAssertEqual(body["project_id"] as? String, "project-new")
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
-            default:
-                XCTFail("Unexpected request path: \(path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
+            },
+            frames: frames,
+            responses: [
+                "projects.create": """
+                {"project":{"id":"project-new","name":"Client Work","color":"#7cb9ff","created_at":1770000000}}
+                """,
+                "session.workspace.move": #"{"ok":true}"#
+            ]
+        )
 
         await viewModel.load()
         let session = try await MainActor.run {
@@ -1144,12 +1209,33 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertEqual(movedProjectID, "project-new")
         XCTAssertEqual(
             requestedPaths,
-            ["/api/sessions", "/api/projects/create", "/api/session/move", "/api/sessions"]
+            [
+                "/api/sessions",              // initial load
+                "/api/auth/ws-ticket",        // createProject: mint ticket
+                "/api/auth/ws-ticket",        // move: mint ticket
+                "/api/sessions/session-abc",  // move: post-RPC detail reload
+                "/api/sessions"               // createProject: follow-up list reload
+            ]
         )
         XCTAssertFalse(isCreatingProject)
         XCTAssertFalse(isMovingSession)
         XCTAssertNil(actionErrorMessage)
         XCTAssertNil(lastError)
+
+        // Assert both gateway RPCs: projects.create carries name+folders, and
+        // session.workspace.move carries the session + target project.
+        let framesByMethod = Dictionary(grouping: frames.all, by: { jsonMethod($0) })
+        let createFrame = try XCTUnwrap(framesByMethod["projects.create"]?.first)
+        let createJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(createFrame.utf8)) as? [String: Any])
+        let createParams = try XCTUnwrap(createJSON["params"] as? [String: Any])
+        XCTAssertEqual(createParams["name"] as? String, "Client Work")
+        XCTAssertEqual(createParams["folders"] as? [String], [])
+
+        let moveFrame = try XCTUnwrap(framesByMethod["session.workspace.move"]?.first)
+        let moveJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(moveFrame.utf8)) as? [String: Any])
+        let moveParams = try XCTUnwrap(moveJSON["params"] as? [String: Any])
+        XCTAssertEqual(moveParams["session_id"] as? String, "session-abc")
+        XCTAssertEqual(moveParams["project_id"] as? String, "project-new")
     }
 
     func testCreateProjectBlocksBlankNameBeforeNetworkRequest() async throws {
@@ -1184,36 +1270,31 @@ final class SessionListMutationTests: XCTestCase {
 
     func testCreateProjectMoveFailureKeepsSessionUnmovedAndShowsError() async throws {
         var loadCount = 0
-        let viewModel = try await makeViewModel { request in
-            switch request.url?.path {
-            case "/api/sessions":
-                loadCount += 1
-                XCTAssertEqual(loadCount, 1)
-                return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
-            case "/api/projects/create":
-                return apiTestJSONResponse("""
-                {
-                  "ok": true,
-                  "project": {
-                    "project_id": "project-new",
-                    "name": "Client Work",
-                    "color": "#7cb9ff"
-                  }
+        let frames = LockedStringList()
+        let viewModel = try await makeGatewayViewModel(
+            handler: { request in
+                switch request.url?.path {
+                case "/api/sessions":
+                    loadCount += 1
+                    XCTAssertEqual(loadCount, 1)
+                    return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
+                case "/api/auth/ws-ticket":
+                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+                default:
+                    XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                    throw URLError(.badURL)
                 }
-                """, for: request)
-            case "/api/session/move":
-                let response = HTTPURLResponse(
-                    url: try XCTUnwrap(request.url),
-                    statusCode: 500,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "application/json"]
-                )
-                return (try XCTUnwrap(response), Data(#"{"error":"move failed"}"#.utf8))
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
+            },
+            frames: frames,
+            responses: [
+                "projects.create": """
+                {"project":{"id":"project-new","name":"Client Work","color":"#7cb9ff"}}
+                """
+            ],
+            rpcErrors: [
+                "session.workspace.move": (code: -32000, message: "move failed")
+            ]
+        )
 
         await viewModel.load()
         let before = await MainActor.run { viewModel.sessions }
@@ -1244,37 +1325,30 @@ final class SessionListMutationTests: XCTestCase {
     func testCreateEmptyProjectCreatesProjectWithoutMovingAnySession() async throws {
         var loadCount = 0
         var requestedPaths: [String] = []
-        let viewModel = try await makeViewModel { request in
-            let path = request.url?.path
-            requestedPaths.append(path ?? "")
+        let frames = LockedStringList()
+        let viewModel = try await makeGatewayViewModel(
+            handler: { request in
+                let path = request.url?.path
+                requestedPaths.append(path ?? "")
 
-            switch path {
-            case "/api/sessions":
-                loadCount += 1
-                return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
-            case "/api/projects/create":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["name"] as? String, "Client Work")
-                XCTAssertEqual(body["color"] as? String, "#7cb9ff")
-                return apiTestJSONResponse("""
-                {
-                  "ok": true,
-                  "project": {
-                    "project_id": "project-new",
-                    "name": "Client Work",
-                    "color": "#7cb9ff",
-                    "created_at": 1770000000
-                  }
+                switch path {
+                case "/api/sessions":
+                    loadCount += 1
+                    return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
+                case "/api/auth/ws-ticket":
+                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+                default:
+                    XCTFail("Unexpected request path: \(path ?? "nil")")
+                    throw URLError(.badURL)
                 }
-                """, for: request)
-            case "/api/session/move":
-                XCTFail("createEmptyProject must not move any session")
-                throw URLError(.badURL)
-            default:
-                XCTFail("Unexpected request path: \(path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
+            },
+            frames: frames,
+            responses: [
+                "projects.create": """
+                {"project":{"id":"project-new","name":"Client Work","color":"#7cb9ff","created_at":1770000000}}
+                """
+            ]
+        )
 
         await viewModel.load()
         let didCreate = await viewModel.createEmptyProject(
@@ -1295,11 +1369,12 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertEqual(projectName, "Client Work")
         // The existing session stays unassigned: no move request was made.
         XCTAssertNil(sessionProjectID)
-        XCTAssertFalse(requestedPaths.contains("/api/session/move"))
         XCTAssertEqual(
             requestedPaths,
-            ["/api/sessions", "/api/projects/create", "/api/sessions"]
+            ["/api/sessions", "/api/auth/ws-ticket", "/api/sessions"]
         )
+        XCTAssertEqual(frames.all.filter { $0.contains("projects.create") }.count, 1)
+        XCTAssertFalse(frames.all.contains { $0.contains("session.workspace.move") })
         XCTAssertFalse(isCreatingProject)
         XCTAssertFalse(isMovingSession)
         XCTAssertNil(actionErrorMessage)
@@ -1329,18 +1404,26 @@ final class SessionListMutationTests: XCTestCase {
 
     func testCreateEmptyProjectMissingProjectInResponseShowsError() async throws {
         var requestedPaths: [String] = []
-        let viewModel = try await makeViewModel { request in
-            let path = request.url?.path
-            requestedPaths.append(path ?? "")
+        let frames = LockedStringList()
+        let viewModel = try await makeGatewayViewModel(
+            handler: { request in
+                let path = request.url?.path
+                requestedPaths.append(path ?? "")
 
-            switch path {
-            case "/api/projects/create":
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
-            default:
-                XCTFail("Unexpected request path: \(path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
+                switch path {
+                case "/api/auth/ws-ticket":
+                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+                default:
+                    XCTFail("Unexpected request path: \(path ?? "nil")")
+                    throw URLError(.badURL)
+                }
+            },
+            frames: frames,
+            // The native projects.create reply lacks the `project` object.
+            responses: [
+                "projects.create": #"{"ok":true}"#
+            ]
+        )
 
         let didCreate = await viewModel.createEmptyProject(
             named: "Client Work",
@@ -1352,7 +1435,7 @@ final class SessionListMutationTests: XCTestCase {
         let actionErrorMessage = await MainActor.run { viewModel.actionErrorMessage }
         let isCreatingProject = await MainActor.run { viewModel.isCreatingProject }
 
-        XCTAssertEqual(requestedPaths, ["/api/projects/create"])
+        XCTAssertEqual(requestedPaths, ["/api/auth/ws-ticket"])
         XCTAssertTrue(projectIDs.isEmpty)
         XCTAssertEqual(actionErrorMessage, "The server did not return the new project.")
         XCTAssertFalse(isCreatingProject)
@@ -1360,24 +1443,26 @@ final class SessionListMutationTests: XCTestCase {
 
     func testCreateEmptyProjectNetworkFailureSetsError() async throws {
         var requestedPaths: [String] = []
-        let viewModel = try await makeViewModel { request in
-            let path = request.url?.path
-            requestedPaths.append(path ?? "")
+        let frames = LockedStringList()
+        let viewModel = try await makeGatewayViewModel(
+            handler: { request in
+                let path = request.url?.path
+                requestedPaths.append(path ?? "")
 
-            switch path {
-            case "/api/projects/create":
-                let response = HTTPURLResponse(
-                    url: try XCTUnwrap(request.url),
-                    statusCode: 500,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "application/json"]
-                )
-                return (try XCTUnwrap(response), Data(#"{"error":"server boom"}"#.utf8))
-            default:
-                XCTFail("Unexpected request path: \(path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
+                switch path {
+                case "/api/auth/ws-ticket":
+                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+                default:
+                    XCTFail("Unexpected request path: \(path ?? "nil")")
+                    throw URLError(.badURL)
+                }
+            },
+            frames: frames,
+            responses: [:],
+            rpcErrors: [
+                "projects.create": (code: -32000, message: "server boom")
+            ]
+        )
 
         let didCreate = await viewModel.createEmptyProject(
             named: "Client Work",
@@ -1390,7 +1475,7 @@ final class SessionListMutationTests: XCTestCase {
         let lastError = await MainActor.run { viewModel.lastError }
         let isCreatingProject = await MainActor.run { viewModel.isCreatingProject }
 
-        XCTAssertEqual(requestedPaths, ["/api/projects/create"])
+        XCTAssertEqual(requestedPaths, ["/api/auth/ws-ticket"])
         XCTAssertTrue(projectIDs.isEmpty)
         XCTAssertNotNil(actionErrorMessage)
         XCTAssertNotNil(lastError)
@@ -1399,43 +1484,30 @@ final class SessionListMutationTests: XCTestCase {
 
     func testRenameProjectUpdatesLocalProject() async throws {
         var requestedPaths: [String] = []
-        let viewModel = try await makeViewModel { request in
-            let path = request.url?.path
-            requestedPaths.append(path ?? "")
+        let frames = LockedStringList()
+        let viewModel = try await makeGatewayViewModel(
+            handler: { request in
+                let path = request.url?.path
+                requestedPaths.append(path ?? "")
 
-            switch path {
-            case "/api/projects":
-                return apiTestJSONResponse("""
-                {
-                  "projects": [
-                    {
-                      "project_id": "project-1",
-                      "name": "Client Work",
-                      "color": "#7cb9ff"
-                    }
-                  ]
+                switch path {
+                case "/api/auth/ws-ticket":
+                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+                default:
+                    XCTFail("Unexpected request path: \(path ?? "nil")")
+                    throw URLError(.badURL)
                 }
-                """, for: request)
-            case "/api/projects/rename":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["project_id"] as? String, "project-1")
-                XCTAssertEqual(body["name"] as? String, "Client Archive")
-                XCTAssertEqual(body["color"] as? String, "#f5c542")
-                return apiTestJSONResponse("""
-                {
-                  "ok": true,
-                  "project": {
-                    "project_id": "project-1",
-                    "name": "Client Archive",
-                    "color": "#f5c542"
-                  }
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
+            },
+            frames: frames,
+            responses: [
+                "projects.tree": """
+                {"projects":[{"id":"project-1","label":"Client Work","color":"#7cb9ff"}]}
+                """,
+                "projects.update": """
+                {"project":{"id":"project-1","name":"Client Archive","color":"#f5c542"}}
+                """
+            ]
+        )
 
         await viewModel.loadProjects()
         let project = try await MainActor.run {
@@ -1452,36 +1524,44 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertEqual(projects.first?.projectId, "project-1")
         XCTAssertEqual(projects.first?.name, "Client Archive")
         XCTAssertEqual(projects.first?.color, "#f5c542")
-        XCTAssertEqual(requestedPaths, ["/api/projects", "/api/projects/rename"])
+        XCTAssertEqual(requestedPaths, ["/api/auth/ws-ticket", "/api/auth/ws-ticket"])
         XCTAssertFalse(isRenamingProject)
         XCTAssertNil(actionErrorMessage)
         XCTAssertNil(lastError)
+
+        // Assert the projects.update RPC body (id + name + color).
+        let framesByMethod = Dictionary(grouping: frames.all, by: { jsonMethod($0) })
+        let updateFrame = try XCTUnwrap(framesByMethod["projects.update"]?.first)
+        let updateJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(updateFrame.utf8)) as? [String: Any])
+        let updateParams = try XCTUnwrap(updateJSON["params"] as? [String: Any])
+        XCTAssertEqual(updateParams["id"] as? String, "project-1")
+        XCTAssertEqual(updateParams["name"] as? String, "Client Archive")
+        XCTAssertEqual(updateParams["color"] as? String, "#f5c542")
     }
 
     func testRenameProjectBlocksBlankNameBeforeNetworkRequest() async throws {
         var requestedPaths: [String] = []
-        let viewModel = try await makeViewModel { request in
-            let path = request.url?.path
-            requestedPaths.append(path ?? "")
+        let frames = LockedStringList()
+        let viewModel = try await makeGatewayViewModel(
+            handler: { request in
+                let path = request.url?.path
+                requestedPaths.append(path ?? "")
 
-            switch path {
-            case "/api/projects":
-                return apiTestJSONResponse("""
-                {
-                  "projects": [
-                    {
-                      "project_id": "project-1",
-                      "name": "Client Work",
-                      "color": "#7cb9ff"
-                    }
-                  ]
+                switch path {
+                case "/api/auth/ws-ticket":
+                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+                default:
+                    XCTFail("Blank project names should not make rename requests: \(path ?? "nil")")
+                    throw URLError(.badURL)
                 }
-                """, for: request)
-            default:
-                XCTFail("Blank project names should not make rename requests: \(path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
+            },
+            frames: frames,
+            responses: [
+                "projects.tree": """
+                {"projects":[{"id":"project-1","label":"Client Work","color":"#7cb9ff"}]}
+                """
+            ]
+        )
 
         await viewModel.loadProjects()
         let project = try await MainActor.run {
@@ -1493,7 +1573,8 @@ final class SessionListMutationTests: XCTestCase {
         let isRenamingProject = await MainActor.run { viewModel.isRenamingProject }
 
         XCTAssertFalse(didRename)
-        XCTAssertEqual(requestedPaths, ["/api/projects"])
+        XCTAssertEqual(requestedPaths, ["/api/auth/ws-ticket"])
+        XCTAssertFalse(frames.all.contains { $0.contains("projects.update") })
         XCTAssertEqual(actionErrorMessage, "Enter a project name.")
         XCTAssertNil(lastError)
         XCTAssertFalse(isRenamingProject)
@@ -1501,36 +1582,30 @@ final class SessionListMutationTests: XCTestCase {
 
     func testRenameProjectFailureKeepsProject() async throws {
         var requestedPaths: [String] = []
-        let viewModel = try await makeViewModel { request in
-            let path = request.url?.path
-            requestedPaths.append(path ?? "")
+        let frames = LockedStringList()
+        let viewModel = try await makeGatewayViewModel(
+            handler: { request in
+                let path = request.url?.path
+                requestedPaths.append(path ?? "")
 
-            switch path {
-            case "/api/projects":
-                return apiTestJSONResponse("""
-                {
-                  "projects": [
-                    {
-                      "project_id": "project-1",
-                      "name": "Client Work",
-                      "color": "#7cb9ff"
-                    }
-                  ]
+                switch path {
+                case "/api/auth/ws-ticket":
+                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+                default:
+                    XCTFail("Unexpected request path: \(path ?? "nil")")
+                    throw URLError(.badURL)
                 }
-                """, for: request)
-            case "/api/projects/rename":
-                let response = HTTPURLResponse(
-                    url: try XCTUnwrap(request.url),
-                    statusCode: 500,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "application/json"]
-                )
-                return (try XCTUnwrap(response), Data(#"{"error":"rename failed"}"#.utf8))
-            default:
-                XCTFail("Unexpected request path: \(path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
+            },
+            frames: frames,
+            responses: [
+                "projects.tree": """
+                {"projects":[{"id":"project-1","label":"Client Work","color":"#7cb9ff"}]}
+                """
+            ],
+            rpcErrors: [
+                "projects.update": (code: -32000, message: "rename failed")
+            ]
+        )
 
         await viewModel.loadProjects()
         let beforeProjects = await MainActor.run { viewModel.projects }
@@ -1542,7 +1617,7 @@ final class SessionListMutationTests: XCTestCase {
         let isRenamingProject = await MainActor.run { viewModel.isRenamingProject }
 
         XCTAssertFalse(didRename)
-        XCTAssertEqual(requestedPaths, ["/api/projects", "/api/projects/rename"])
+        XCTAssertEqual(requestedPaths, ["/api/auth/ws-ticket", "/api/auth/ws-ticket"])
         XCTAssertEqual(projects, beforeProjects)
         XCTAssertNotNil(actionErrorMessage)
         XCTAssertNotNil(lastError)
@@ -1552,61 +1627,57 @@ final class SessionListMutationTests: XCTestCase {
     func testDeleteProjectRemovesProjectAndReloadsUnassignedSessions() async throws {
         var sessionLoadCount = 0
         var requestedPaths: [String] = []
-        let viewModel = try await makeViewModel { request in
-            let path = request.url?.path
-            requestedPaths.append(path ?? "")
+        let frames = LockedStringList()
+        let viewModel = try await makeGatewayViewModel(
+            handler: { request in
+                let path = request.url?.path
+                requestedPaths.append(path ?? "")
 
-            switch path {
-            case "/api/sessions":
-                sessionLoadCount += 1
-                if sessionLoadCount == 1 {
+                switch path {
+                case "/api/sessions":
+                    sessionLoadCount += 1
+                    if sessionLoadCount == 1 {
+                        return apiTestJSONResponse("""
+                        {
+                          "sessions": [
+                            {
+                              "session_id": "session-abc",
+                              "title": "Planning",
+                              "project_id": "project-1",
+                              "archived": false
+                            }
+                          ]
+                        }
+                        """, for: request)
+                    }
+
                     return apiTestJSONResponse("""
                     {
                       "sessions": [
                         {
                           "session_id": "session-abc",
                           "title": "Planning",
-                          "project_id": "project-1",
+                          "project_id": null,
                           "archived": false
                         }
                       ]
                     }
                     """, for: request)
+                case "/api/auth/ws-ticket":
+                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+                default:
+                    XCTFail("Unexpected request path: \(path ?? "nil")")
+                    throw URLError(.badURL)
                 }
-
-                return apiTestJSONResponse("""
-                {
-                  "sessions": [
-                    {
-                      "session_id": "session-abc",
-                      "title": "Planning",
-                      "project_id": null,
-                      "archived": false
-                    }
-                  ]
-                }
-                """, for: request)
-            case "/api/projects":
-                return apiTestJSONResponse("""
-                {
-                  "projects": [
-                    {
-                      "project_id": "project-1",
-                      "name": "Client Work",
-                      "color": "#7cb9ff"
-                    }
-                  ]
-                }
-                """, for: request)
-            case "/api/projects/delete":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["project_id"] as? String, "project-1")
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
-            default:
-                XCTFail("Unexpected request path: \(path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
+            },
+            frames: frames,
+            responses: [
+                "projects.tree": """
+                {"projects":[{"id":"project-1","label":"Client Work","color":"#7cb9ff"}]}
+                """,
+                "projects.delete": #"{"ok":true}"#
+            ]
+        )
 
         await viewModel.load()
         await viewModel.loadProjects()
@@ -1628,54 +1699,55 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertNil(lastError)
         XCTAssertEqual(
             requestedPaths,
-            ["/api/sessions", "/api/projects", "/api/projects/delete", "/api/sessions"]
+            ["/api/sessions", "/api/auth/ws-ticket", "/api/auth/ws-ticket", "/api/sessions"]
         )
+        // Assert the projects.delete RPC carries the project id.
+        let framesByMethod = Dictionary(grouping: frames.all, by: { jsonMethod($0) })
+        let deleteFrame = try XCTUnwrap(framesByMethod["projects.delete"]?.first)
+        let deleteJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(deleteFrame.utf8)) as? [String: Any])
+        let deleteParams = try XCTUnwrap(deleteJSON["params"] as? [String: Any])
+        XCTAssertEqual(deleteParams["id"] as? String, "project-1")
+        XCTAssertNil(deleteParams["project_id"])
     }
 
     func testDeleteProjectFailureKeepsProjectAndSessions() async throws {
         var sessionLoadCount = 0
-        let viewModel = try await makeViewModel { request in
-            switch request.url?.path {
-            case "/api/sessions":
-                sessionLoadCount += 1
-                XCTAssertEqual(sessionLoadCount, 1)
-                return apiTestJSONResponse("""
-                {
-                  "sessions": [
+        let frames = LockedStringList()
+        let viewModel = try await makeGatewayViewModel(
+            handler: { request in
+                switch request.url?.path {
+                case "/api/sessions":
+                    sessionLoadCount += 1
+                    XCTAssertEqual(sessionLoadCount, 1)
+                    return apiTestJSONResponse("""
                     {
-                      "session_id": "session-abc",
-                      "title": "Planning",
-                      "project_id": "project-1",
-                      "archived": false
+                      "sessions": [
+                        {
+                          "session_id": "session-abc",
+                          "title": "Planning",
+                          "project_id": "project-1",
+                          "archived": false
+                        }
+                      ]
                     }
-                  ]
+                    """, for: request)
+                case "/api/auth/ws-ticket":
+                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+                default:
+                    XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                    throw URLError(.badURL)
                 }
-                """, for: request)
-            case "/api/projects":
-                return apiTestJSONResponse("""
-                {
-                  "projects": [
-                    {
-                      "project_id": "project-1",
-                      "name": "Client Work",
-                      "color": "#7cb9ff"
-                    }
-                  ]
-                }
-                """, for: request)
-            case "/api/projects/delete":
-                let response = HTTPURLResponse(
-                    url: try XCTUnwrap(request.url),
-                    statusCode: 500,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "application/json"]
-                )
-                return (try XCTUnwrap(response), Data(#"{"error":"delete failed"}"#.utf8))
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
+            },
+            frames: frames,
+            responses: [
+                "projects.tree": """
+                {"projects":[{"id":"project-1","label":"Client Work","color":"#7cb9ff"}]}
+                """
+            ],
+            rpcErrors: [
+                "projects.delete": (code: -32000, message: "delete failed")
+            ]
+        )
 
         await viewModel.load()
         await viewModel.loadProjects()
@@ -1708,7 +1780,7 @@ final class SessionListMutationTests: XCTestCase {
             case "/api/sessions":
                 loadCount += 1
                 return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
-            case "/api/session/archive":
+            case "/api/sessions/session-abc":
                 let response = HTTPURLResponse(
                     url: try XCTUnwrap(request.url),
                     statusCode: 500,
@@ -1751,11 +1823,17 @@ final class SessionListMutationTests: XCTestCase {
                     headerFields: ["Content-Type": "application/json"]
                 )
                 return (try XCTUnwrap(response), Data(#"{"error":"reload failed"}"#.utf8))
-            case "/api/session/archive":
+            case "/api/sessions/session-abc":
                 let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
                 XCTAssertEqual(body["archived"] as? Bool, true)
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
+                XCTAssertNil(body["session_id"])
+                return apiTestJSONResponse("""
+                {
+                  "session_id": "session-abc",
+                  "title": "Planning",
+                  "archived": true
+                }
+                """, for: request)
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
@@ -1779,18 +1857,24 @@ final class SessionListMutationTests: XCTestCase {
         let viewModel = try makeArchivedViewModel { request in
             switch request.url?.path {
             case "/api/sessions":
-                // The archived screen must opt in to archived rows — without
-                // include_archived=1 the server returns none (issue #17).
+                // The archived screen must opt in to archived rows — the native
+                // list pages by `archived=include` (issue #17).
                 let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
                 let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-                XCTAssertEqual(query["include_archived"], "1")
+                XCTAssertEqual(query["archived"], "include")
                 return apiTestJSONResponse(self.archivedSessionListJSON(), for: request)
-            case "/api/session/archive":
+            case "/api/sessions/session-abc":
                 archiveRequestCount += 1
                 let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
                 XCTAssertEqual(body["archived"] as? Bool, false)
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
+                XCTAssertNil(body["session_id"])
+                return apiTestJSONResponse("""
+                {
+                  "session_id": "session-abc",
+                  "title": "Planning",
+                  "archived": false
+                }
+                """, for: request)
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
@@ -1816,13 +1900,13 @@ final class SessionListMutationTests: XCTestCase {
         let viewModel = try makeArchivedViewModel { request in
             switch request.url?.path {
             case "/api/sessions":
-                // The archived screen must opt in to archived rows — without
-                // include_archived=1 the server returns none (issue #17).
+                // The archived screen must opt in to archived rows — the native
+                // list pages by `archived=include` (issue #17).
                 let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
                 let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-                XCTAssertEqual(query["include_archived"], "1")
+                XCTAssertEqual(query["archived"], "include")
                 return apiTestJSONResponse(self.archivedSessionListJSON(), for: request)
-            case "/api/session/archive":
+            case "/api/sessions/session-abc":
                 let response = HTTPURLResponse(
                     url: try XCTUnwrap(request.url),
                     statusCode: 500,
@@ -1856,7 +1940,7 @@ final class SessionListMutationTests: XCTestCase {
             switch request.url?.path {
             case "/api/sessions":
                 return apiTestJSONResponse(self.archivedSessionListJSON(), for: request)
-            case "/api/session/archive":
+            case "/api/sessions/session-abc":
                 let response = HTTPURLResponse(
                     url: try XCTUnwrap(request.url),
                     statusCode: 400,
@@ -1884,60 +1968,13 @@ final class SessionListMutationTests: XCTestCase {
     }
 
     @MainActor
-    func testArchivedSessionUnarchiveOkResponseWithErrorFieldSurfacesMessageAndRestoresRow() async throws {
-        let viewModel = try makeArchivedViewModel { request in
-            switch request.url?.path {
-            case "/api/sessions":
-                return apiTestJSONResponse(self.archivedSessionListJSON(), for: request)
-            case "/api/session/archive":
-                return apiTestJSONResponse(#"{"ok": false, "error": "Session not writable"}"#, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        await viewModel.load()
-        let before = viewModel.sessions
-        let didUnarchive = await viewModel.unarchive(try XCTUnwrap(viewModel.sessions.first))
-
-        XCTAssertFalse(didUnarchive)
-        XCTAssertEqual(viewModel.sessions, before)
-        XCTAssertEqual(viewModel.actionErrorMessage, "Session not writable")
-    }
-
-    @MainActor
-    func testArchivedSessionUnarchiveOkFalseWithoutErrorFieldFailsAndRestoresRow() async throws {
-        // An explicit `ok: false` with no `error` string must still be treated
-        // as a failure — reporting success here would permanently drop the row
-        // from the archived list even though the server did not restore it.
-        let viewModel = try makeArchivedViewModel { request in
-            switch request.url?.path {
-            case "/api/sessions":
-                return apiTestJSONResponse(self.archivedSessionListJSON(), for: request)
-            case "/api/session/archive":
-                return apiTestJSONResponse(#"{"ok": false}"#, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        await viewModel.load()
-        let before = viewModel.sessions
-        let didUnarchive = await viewModel.unarchive(try XCTUnwrap(viewModel.sessions.first))
-
-        XCTAssertFalse(didUnarchive)
-        XCTAssertEqual(viewModel.sessions, before)
-        XCTAssertNotNil(viewModel.actionErrorMessage)
-        XCTAssertFalse(viewModel.isUnarchiving)
-    }
-
-    @MainActor
     func testLoadStoresArchivedCountFromResponseForArchivedEntry() async throws {
         let viewModel = try makeViewModel { request in
             XCTAssertEqual(request.url?.path, "/api/sessions")
-            XCTAssertNil(request.url?.query)
+            let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
+            let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+            XCTAssertEqual(query["archived"], "exclude")
+            XCTAssertEqual(query["limit"], "100")
             return apiTestJSONResponse("""
             {
               "sessions": [
@@ -1947,7 +1984,7 @@ final class SessionListMutationTests: XCTestCase {
                   "archived": false
                 }
               ],
-              "archived_count": 8
+              "total": 8
             }
             """, for: request)
         }
@@ -1962,7 +1999,6 @@ final class SessionListMutationTests: XCTestCase {
 
     @MainActor
     func testDuplicateBranchesWithCopyTitleLoadsDetailAndInsertsWhenReloadOmitsCopy() async throws {
-        var branchCount = 0
         var didRequestDuplicatedDetail = false
         let source = try makeSessionSummary(
             id: "session-abc",
@@ -1970,65 +2006,90 @@ final class SessionListMutationTests: XCTestCase {
             pinned: false,
             archived: false
         )
-        let viewModel = try makeViewModel { request in
-            switch request.url?.path {
-            case "/api/session/branch":
-                branchCount += 1
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                XCTAssertEqual(body["title"] as? String, "Planning (copy)")
-
-                if branchCount == 1 {
+        let frames = LockedStringList()
+        let viewModel = try makeGatewayViewModel(
+            handler: { request in
+                switch request.url?.path {
+                case "/api/sessions":
+                    // The reload after the duplicate omits the copy, so the VM
+                    // inserts it locally from the detail fetch.
+                    return apiTestJSONResponse("""
+                    {
+                      "sessions": [
+                        {
+                          "session_id": "session-abc",
+                          "title": "Planning",
+                          "archived": false
+                        }
+                      ]
+                    }
+                    """, for: request)
+                case "/api/auth/ws-ticket":
+                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+                case "/api/sessions/copy-123":
+                    didRequestDuplicatedDetail = true
                     return apiTestJSONResponse("""
                     {
                       "session_id": "copy-123",
-                      "parent_session_id": "session-abc"
-                    }
-                    """, for: request)
-                }
-
-                return apiTestJSONResponse("""
-                {
-                  "error": "copy failed"
-                }
-                """, for: request)
-            case "/api/session":
-                didRequestDuplicatedDetail = true
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "copy-123",
-                    "title": "Planning (copy)",
-                    "archived": false
-                  }
-                }
-                """, for: request)
-            case "/api/sessions":
-                return apiTestJSONResponse("""
-                {
-                  "sessions": [
-                    {
-                      "session_id": "session-abc",
-                      "title": "Planning",
+                      "title": "Planning (copy)",
                       "archived": false
                     }
-                  ]
+                    """, for: request)
+                default:
+                    XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                    throw URLError(.badURL)
                 }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
+            },
+            frames: frames,
+            responses: [
+                "session.branch": #"{"session_id":"copy-123","title":"Planning (copy)","parent":"session-abc"}"#
+            ]
+        )
 
         let duplicated = await viewModel.duplicate(source)
-        let missingID = await viewModel.duplicate(source)
 
         XCTAssertTrue(didRequestDuplicatedDetail)
         XCTAssertEqual(duplicated?.sessionId, "copy-123")
         XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["copy-123", "session-abc"])
-        XCTAssertNil(missingID)
-        XCTAssertEqual(viewModel.actionErrorMessage, "copy failed")
+
+        // A second duplicate whose branch RPC fails surfaces the error without
+        // adding a row. The helper routes `session.branch` to a canned error via
+        // the per-method RPC failure map.
+        let failureFrames = LockedStringList()
+        let failingViewModel = try makeGatewayViewModel(
+            handler: { request in
+                switch request.url?.path {
+                case "/api/sessions":
+                    return apiTestJSONResponse("""
+                    {
+                      "sessions": [
+                        {
+                          "session_id": "session-abc",
+                          "title": "Planning",
+                          "archived": false
+                        }
+                      ]
+                    }
+                    """, for: request)
+                case "/api/auth/ws-ticket":
+                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+                default:
+                    XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                    throw URLError(.badURL)
+                }
+            },
+            frames: failureFrames,
+            responses: [:],
+            rpcErrors: [
+                "session.branch": (code: -32000, message: "copy failed")
+            ]
+        )
+        let missing = await failingViewModel.duplicate(source)
+
+        XCTAssertNil(missing)
+        // The failed duplicate surfaces the error and adds no row to the list.
+        XCTAssertEqual(failingViewModel.sessions.compactMap(\.sessionId), [])
+        XCTAssertEqual(failingViewModel.actionErrorMessage, "copy failed")
     }
 
     @MainActor
@@ -2072,22 +2133,23 @@ final class SessionListMutationTests: XCTestCase {
             case "/api/sessions/search":
                 let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
                 let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+                // Native FTS5 search pages by `q` + `limit`; the content/depth
+                // knobs are gone.
                 XCTAssertEqual(query["q"], "needle")
-                XCTAssertEqual(query["content"], "1")
-                XCTAssertEqual(query["depth"], "5")
+                XCTAssertEqual(query["limit"], "20")
+                XCTAssertNil(query["content"])
+                XCTAssertNil(query["depth"])
 
+                // Native search rows carry no `match_type` marker; decoding
+                // tolerantly maps them but the client can no longer distinguish
+                // content matches to append.
                 return apiTestJSONResponse("""
                 {
-                  "sessions": [
-                    {"session_id": "content-project", "title": "Budget", "match_type": "content"},
-                    {"session_id": "content-other-project", "title": "Roadmap", "match_type": "content"},
-                    {"session_id": "local-title", "title": "Needle planning", "match_type": "content"},
-                    {"session_id": "unknown-session", "title": "Unknown", "match_type": "content"},
-                    {"session_id": "archived-session", "title": "Archived", "match_type": "content"},
-                    {"session_id": "title-only", "title": "Needle remote", "match_type": "title"}
-                  ],
-                  "query": "needle",
-                  "count": 6
+                  "results": [
+                    {"session_id": "content-project", "title": "Budget"},
+                    {"session_id": "content-other-project", "title": "Roadmap"},
+                    {"session_id": "local-title", "title": "Needle planning"}
+                  ]
                 }
                 """, for: request)
             default:
@@ -2099,18 +2161,19 @@ final class SessionListMutationTests: XCTestCase {
         await viewModel.load()
         await viewModel.searchSessions(query: "needle", debounceNanoseconds: 0)
 
+        // Native rows carry no content marker, so no remote content matches are
+        // appended; visible sessions are just the local title matches, still
+        // scoped by project.
+        XCTAssertTrue(viewModel.remoteContentSearchSessionIDs.isEmpty)
         XCTAssertEqual(
             viewModel.visibleSessions(searchText: "needle", selectedProjectID: "project-1").compactMap(\.sessionId),
-            ["local-title", "content-project"]
+            ["local-title"]
         )
         XCTAssertEqual(
             viewModel.visibleSessions(searchText: "needle", selectedProjectID: "project-2").compactMap(\.sessionId),
-            ["content-other-project"]
+            []
         )
-        XCTAssertEqual(
-            viewModel.visibleSessions(searchText: "needle", selectedProjectID: nil).compactMap(\.sessionId),
-            ["local-title", "content-other-project", "content-project"]
-        )
+        XCTAssertNil(viewModel.searchErrorMessage)
     }
 
     @MainActor
@@ -2139,17 +2202,17 @@ final class SessionListMutationTests: XCTestCase {
                 let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
                 let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
                 let searchQuery = query["q"] ?? ""
+                XCTAssertEqual(query["limit"], "20")
+                XCTAssertNil(query["content"])
 
                 if searchQuery == "old" {
                     oldSearchStarted.fulfill()
                     Thread.sleep(forTimeInterval: 0.15)
                     return apiTestJSONResponse("""
                     {
-                      "sessions": [
-                        {"session_id": "old-content", "title": "First result", "match_type": "content"}
-                      ],
-                      "query": "old",
-                      "count": 1
+                      "results": [
+                        {"session_id": "old-content", "title": "First result"}
+                      ]
                     }
                     """, for: request)
                 }
@@ -2157,11 +2220,9 @@ final class SessionListMutationTests: XCTestCase {
                 if searchQuery == "new" {
                     return apiTestJSONResponse("""
                     {
-                      "sessions": [
-                        {"session_id": "new-content", "title": "Second result", "match_type": "content"}
-                      ],
-                      "query": "new",
-                      "count": 1
+                      "results": [
+                        {"session_id": "new-content", "title": "Second result"}
+                      ]
                     }
                     """, for: request)
                 }
@@ -2183,10 +2244,15 @@ final class SessionListMutationTests: XCTestCase {
         await viewModel.searchSessions(query: "new", debounceNanoseconds: 0)
         await oldTask.value
 
-        XCTAssertEqual(viewModel.remoteContentSearchSessionIDs, ["new-content"])
+        // Native search rows carry no content marker, so the stale "old" results
+        // can never become the current content-match set; the newest search wins
+        // and it contributes no content matches. Local title search on "new"
+        // matches none of the loaded rows ("First result"/"Second result").
+        XCTAssertTrue(viewModel.remoteContentSearchSessionIDs.isEmpty)
+        XCTAssertNil(viewModel.searchErrorMessage)
         XCTAssertEqual(
             viewModel.visibleSessions(searchText: "new", selectedProjectID: nil).compactMap(\.sessionId),
-            ["new-content"]
+            []
         )
     }
 
@@ -2526,6 +2592,9 @@ final class SessionListMutationTests: XCTestCase {
 
         await viewModel.load()
 
+        // Native rows carry no `is_cli_session` column (the native decoder maps
+        // it to nil), so the CLI row is indistinguishable from a normal one and
+        // the CLI toggle is a no-op. Cron rows are still detected client-side.
         // Default keeps every row.
         XCTAssertEqual(
             Set(viewModel.visibleSessions(searchText: "", selectedProjectID: nil).compactMap(\.sessionId)),
@@ -2542,24 +2611,26 @@ final class SessionListMutationTests: XCTestCase {
             ["normal-1", "cli-1", "normal-2"]
         )
 
-        // Hiding CLI only removes the CLI row; cron and normal rows stay.
+        // Hiding CLI cannot distinguish the CLI row natively, so it stays;
+        // cron and normal rows are unaffected.
         XCTAssertEqual(
             Set(viewModel.visibleSessions(
                 searchText: "",
                 selectedProjectID: nil,
                 automatedVisibility: AutomatedSessionVisibility(showsCron: true, showsCli: false)
             ).compactMap(\.sessionId)),
-            ["normal-1", "cron_job_1", "tagged-cron", "normal-2"]
+            ["normal-1", "cli-1", "cron_job_1", "tagged-cron", "normal-2"]
         )
 
-        // Hiding both leaves only the normal WebUI sessions, newest first.
+        // Hiding cron removes only the cron rows; the CLI row still cannot be
+        // told apart from normal ones, newest first.
         XCTAssertEqual(
             viewModel.visibleSessions(
                 searchText: "",
                 selectedProjectID: nil,
                 automatedVisibility: AutomatedSessionVisibility(showsCron: false, showsCli: false)
             ).compactMap(\.sessionId),
-            ["normal-1", "normal-2"]
+            ["normal-1", "cli-1", "normal-2"]
         )
     }
 
@@ -2572,21 +2643,21 @@ final class SessionListMutationTests: XCTestCase {
                 {
                   "sessions": [
                     {"session_id": "normal-p1", "title": "Planning", "project_id": "p1", "last_message_at": 40},
-                    {"session_id": "subagent-p1", "title": "Delegated research", "project_id": "p1", "source_tag": "subagent", "read_only": true, "last_message_at": 30},
+                    {"session_id": "subagent-p1", "title": "Delegated research", "project_id": "p1", "source_tag": "subagent", "last_message_at": 30},
                     {"session_id": "fork-p1", "title": "Ordinary fork", "project_id": "p1", "parent_session_id": "normal-p1", "relationship_type": "fork", "last_message_at": 20},
                     {"session_id": "normal-p2", "title": "Other project", "project_id": "p2", "last_message_at": 10}
                   ]
                 }
                 """, for: request)
             case "/api/sessions/search":
+                // Native search rows carry no content marker; the response still
+                // decodes tolerantly but contributes no content matches.
                 return apiTestJSONResponse("""
                 {
-                  "sessions": [
-                    {"session_id": "subagent-p1", "title": "Delegated research", "match_type": "content"},
-                    {"session_id": "normal-p2", "title": "Other project", "match_type": "content"}
-                  ],
-                  "query": "needle",
-                  "count": 2
+                  "results": [
+                    {"session_id": "subagent-p1", "title": "Delegated research"},
+                    {"session_id": "normal-p2", "title": "Other project"}
+                  ]
                 }
                 """, for: request)
             default:
@@ -2619,6 +2690,8 @@ final class SessionListMutationTests: XCTestCase {
             ).compactMap(\.sessionId),
             ["normal-p1", "subagent-p1", "fork-p1"]
         )
+        // Local title search still works: "delegated" matches the subagent row's
+        // title, and the visibility toggle gates it.
         XCTAssertTrue(
             viewModel.visibleSessions(
                 searchText: "delegated",
@@ -2637,6 +2710,10 @@ final class SessionListMutationTests: XCTestCase {
 
         await viewModel.searchSessions(query: "needle", debounceNanoseconds: 0)
 
+        // Remote search contributes no content matches (native rows lack the
+        // marker), so the local `searchText` result — which is empty since no
+        // loaded title contains "needle" — stays empty for both visibility modes.
+        XCTAssertTrue(viewModel.remoteContentSearchSessionIDs.isEmpty)
         XCTAssertTrue(
             viewModel.visibleSessions(
                 searchText: "needle",
@@ -2644,13 +2721,12 @@ final class SessionListMutationTests: XCTestCase {
                 automatedVisibility: hidden
             ).isEmpty
         )
-        XCTAssertEqual(
+        XCTAssertTrue(
             viewModel.visibleSessions(
                 searchText: "needle",
                 selectedProjectID: "p1",
                 automatedVisibility: shown
-            ).compactMap(\.sessionId),
-            ["subagent-p1"]
+            ).isEmpty
         )
     }
 
@@ -2663,8 +2739,8 @@ final class SessionListMutationTests: XCTestCase {
                 {
                   "sessions": [
                     {"session_id": "normal-p1", "title": "Planning", "project_id": "p1", "last_message_at": 40},
-                    {"session_id": "claude-p1", "title": "Imported transcript", "project_id": "p1", "source_tag": "claude_code", "raw_source": "claude_code", "is_cli_session": true, "read_only": true, "last_message_at": 30},
-                    {"session_id": "cli-p1", "title": "Terminal chat", "project_id": "p1", "source_tag": "cli", "is_cli_session": true, "last_message_at": 20},
+                    {"session_id": "claude-p1", "title": "Imported transcript", "project_id": "p1", "source_tag": "claude_code", "raw_source": "claude_code", "last_message_at": 30},
+                    {"session_id": "cli-p1", "title": "Terminal chat", "project_id": "p1", "source_tag": "cli", "last_message_at": 20},
                     {"session_id": "normal-p2", "title": "Other project", "project_id": "p2", "last_message_at": 10}
                   ]
                 }
@@ -2672,12 +2748,10 @@ final class SessionListMutationTests: XCTestCase {
             case "/api/sessions/search":
                 return apiTestJSONResponse("""
                 {
-                  "sessions": [
-                    {"session_id": "claude-p1", "title": "Imported transcript", "match_type": "content"},
-                    {"session_id": "cli-p1", "title": "Terminal chat", "match_type": "content"}
-                  ],
-                  "query": "needle",
-                  "count": 2
+                  "results": [
+                    {"session_id": "claude-p1", "title": "Imported transcript"},
+                    {"session_id": "cli-p1", "title": "Terminal chat"}
+                  ]
                 }
                 """, for: request)
             default:
@@ -2693,6 +2767,10 @@ final class SessionListMutationTests: XCTestCase {
             showsClaudeCode: false
         )
 
+        // The claude_code source marker still decodes natively, so hiding it
+        // removes the imported-transcript row. The "cli" source_tag row is not
+        // claude_code, so it stays (the native surface carries no separate
+        // is_cli_session for it either).
         XCTAssertEqual(
             viewModel.visibleSessions(
                 searchText: "",
@@ -2704,13 +2782,15 @@ final class SessionListMutationTests: XCTestCase {
 
         await viewModel.searchSessions(query: "needle", debounceNanoseconds: 0)
 
-        XCTAssertEqual(
+        // Native search rows carry no content marker, so no remote content
+        // matches append; local "needle" matches none of the loaded titles.
+        XCTAssertTrue(viewModel.remoteContentSearchSessionIDs.isEmpty)
+        XCTAssertTrue(
             viewModel.visibleSessions(
                 searchText: "needle",
                 selectedProjectID: "p1",
                 automatedVisibility: hidden
-            ).compactMap(\.sessionId),
-            ["cli-p1"]
+            ).isEmpty
         )
     }
 
@@ -2722,6 +2802,86 @@ final class SessionListMutationTests: XCTestCase {
         let client = try makeClient(server: server, handler: handler)
 
         return SessionListViewModel(server: server, client: client)
+    }
+
+    /// Builds a `SessionListViewModel` whose `APIClient` routes every
+    /// `withGatewayConnection` RPC through a test-transport `HermesGatewayClient`
+    /// (the `gatewayFabricator` seam): the websocket handshake completes
+    /// instantly, each outbound JSON-RPC frame is captured on `frames`, and a
+    /// canned `result` per method (or an RPC `error` via `rpcErrors`) is delivered
+    /// back so the call resolves deterministically. `handler` still serves the
+    /// `POST /api/auth/ws-ticket` mint and any REST follow-up (e.g. the post-move
+    /// detail re-read) through `MockURLProtocol`.
+    @MainActor
+    private func makeGatewayViewModel(
+        handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data),
+        frames: LockedStringList,
+        responses: [String: String],
+        rpcErrors: [String: (code: Int, message: String)] = [:],
+        lastResult: String = #"{}"#
+    ) throws -> SessionListViewModel {
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let client = makeGatewayClient(
+            handler: handler,
+            frames: frames,
+            responses: responses,
+            rpcErrors: rpcErrors,
+            lastResult: lastResult
+        )
+        return SessionListViewModel(server: server, client: client)
+    }
+
+    /// Extracts the JSON-RPC `method` from a captured test-transport frame.
+    private func jsonMethod(_ frame: String) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any] else {
+            return nil
+        }
+        return json["method"] as? String
+    }
+
+    /// Builds an `APIClient` whose `withGatewayConnection` uses the test-transport
+    /// `HermesGatewayClient` (mirrors `FixWorkspaceProjectsTests`' helper).
+    private func makeGatewayClient(
+        handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data),
+        frames: LockedStringList,
+        responses: [String: String],
+        rpcErrors: [String: (code: Int, message: String)] = [:],
+        lastResult: String = #"{}"#
+    ) -> APIClient {
+        MockURLProtocol.requestHandler = handler
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let baseURL = URL(string: "https://example.test")!
+
+        return APIClient(
+            baseURL: baseURL,
+            session: session,
+            gatewayFabricator: { _, ticket, profile, headers in
+                let gateway = HermesGatewayClient(
+                    baseURL: baseURL,
+                    ticket: ticket,
+                    profile: profile,
+                    customHeaders: headers
+                )
+                gateway.testSendFrame = { frame in
+                    frames.append(frame)
+                    guard let json = try? JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any],
+                          let id = json["id"] as? Int,
+                          let method = json["method"] as? String else { return }
+                    if let rpcError = rpcErrors[method] {
+                        gateway.testDeliverFrame(
+                            #"{"jsonrpc":"2.0","id":\#(id),"error":{"code":\#(rpcError.code),"message":"\#(rpcError.message)"}}"#
+                        )
+                    } else {
+                        let result = responses[method] ?? lastResult
+                        gateway.testDeliverFrame(#"{"jsonrpc":"2.0","id":\#(id),"result":\#(result)}"#)
+                    }
+                }
+                return gateway
+            }
+        )
     }
 
     private func makeClient(

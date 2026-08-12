@@ -5,55 +5,63 @@ final class ChatComposerConfigLoaderTests: APIClientTestCase {
     func testLoadUsesSessionProfileDefault() async throws {
         let openRouterModel = "deepseek/deepseek-chat-v3-0324:free"
         var requestPaths: [String] = []
+        var requestCount = 0
         let client = makeClient { request in
+            requestCount += 1
             requestPaths.append(request.url?.path ?? "")
 
-            switch request.url?.path {
-            case "/api/profiles":
+            switch (requestCount, request.url?.path) {
+            case (1, "/api/profiles"):
+                // Initial profile list from profiles()'s first REST call.
                 return apiTestJSONResponse("""
                 {
-                  "active": "default",
                   "profiles": [
                     {"name": "default", "model": "gpt-5.4", "provider": "openai", "is_default": true},
                     {"name": "work", "model": "\(openRouterModel)", "provider": "openrouter"}
                   ]
                 }
                 """, for: request)
-            case "/api/profile/switch":
+            case (2, "/api/profiles/active"):
+                // Active lookup: session profile "work" differs from "default".
+                return apiTestJSONResponse(#"{"active": "default"}"#, for: request)
+            case (3, "/api/profiles/active"):
+                // switchProfile(name: "work"): POST the sticky active name.
+                XCTAssertEqual(request.httpMethod, "POST")
                 let body = try apiTestJSONBody(from: request)
                 XCTAssertEqual(body["name"] as? String, "work")
+                return apiTestJSONResponse(#"{"ok": true, "active": "work"}"#, for: request)
+            case (4, "/api/profiles"):
+                // switchProfile reloads the profile list with the fresh active.
                 return apiTestJSONResponse("""
                 {
-                  "active": "work",
-                  "default_model": "\(openRouterModel)",
-                  "default_workspace": "/tmp/workspace",
                   "profiles": [
                     {"name": "default", "model": "gpt-5.4", "provider": "openai", "is_default": true},
                     {"name": "work", "model": "\(openRouterModel)", "provider": "openrouter", "is_active": true}
                   ]
                 }
                 """, for: request)
-            case "/api/models":
+            case (5, "/api/profiles/active"):
+                return apiTestJSONResponse(#"{"active": "work"}"#, for: request)
+            case (6, "/api/model/options"), (7, "/api/model/options"):
+                // models(profile:) and reasoning(profile:) both hit /api/model/options.
                 return apiTestJSONResponse("""
                 {
-                  "default_model": "\(openRouterModel)",
-                  "groups": [
+                  "model": "\(openRouterModel)",
+                  "provider": "openrouter",
+                  "providers": [
                     {
+                      "slug": "openrouter",
                       "name": "OpenRouter",
-                      "provider_id": "openrouter",
-                      "models": [
-                        {"id": "\(openRouterModel)", "name": "DeepSeek Chat v3 Free"}
-                      ]
+                      "models": ["\(openRouterModel)"],
+                      "capabilities": { "\(openRouterModel)": { "reasoning": true, "fast": true } }
                     }
                   ]
                 }
                 """, for: request)
-            case "/api/reasoning":
-                return apiTestJSONResponse(#"{"reasoning_effort": "medium"}"#, for: request)
-            case "/api/workspaces":
-                return apiTestJSONResponse(#"{"workspaces": [{"path": "/tmp/workspace"}], "last": "/tmp/workspace"}"#, for: request)
+            case (8, "/api/fs/default-cwd"):
+                return apiTestJSONResponse(#"{"cwd": "/tmp/workspace"}"#, for: request)
             default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                XCTFail("Unexpected request \(requestCount): \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
             }
         }
@@ -68,74 +76,72 @@ final class ChatComposerConfigLoaderTests: APIClientTestCase {
         XCTAssertEqual(result.state.currentModel, openRouterModel)
         XCTAssertEqual(result.state.currentModelProvider, "openrouter")
         XCTAssertEqual(result.state.currentWorkspace, "/tmp/workspace")
-        XCTAssertEqual(result.state.selectedReasoningEffort, "medium")
-        // Older server: no supported_efforts / supports_reasoning_effort fields.
-        XCTAssertNil(result.state.supportedReasoningEfforts)
-        XCTAssertNil(result.state.supportsReasoningEffort)
+        // The native /api/model/options-derived reasoning always carries the
+        // full effort vocabulary; the seeded effort stays the local selection.
+        XCTAssertNil(result.state.selectedReasoningEffort)
+        XCTAssertEqual(
+            Set(result.state.supportedReasoningEfforts ?? []),
+            ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+        )
+        XCTAssertEqual(result.state.supportsReasoningEffort, true)
         XCTAssertEqual(result.state.workspaceSuggestions, ["/tmp/workspace"])
         XCTAssertEqual(requestPaths, [
             "/api/profiles",
-            "/api/profile/switch",
-            "/api/models",
-            "/api/reasoning",
-            "/api/workspaces"
+            "/api/profiles/active",
+            "/api/profiles/active",
+            "/api/profiles",
+            "/api/profiles/active",
+            "/api/model/options",
+            "/api/model/options",
+            "/api/fs/default-cwd"
         ])
     }
 
     func testLoadKeepsSessionModelOverrideWhenProfileHasDifferentDefault() async throws {
         let sessionModel = "@openai:gpt-5.5"
         let profileDefault = "deepseek/deepseek-chat-v3-0324:free"
-        var reasoningQueryItems: [String: String?] = [:]
+        var requestPaths: [String] = []
+        var requestCount = 0
         let client = makeClient { request in
-            switch request.url?.path {
-            case "/api/profiles":
+            requestCount += 1
+            requestPaths.append(request.url?.path ?? "")
+
+            switch (requestCount, request.url?.path) {
+            case (1, "/api/profiles"):
                 return apiTestJSONResponse("""
                 {
-                  "active": "work",
                   "profiles": [
                     {"name": "work", "model": "\(profileDefault)", "provider": "openrouter", "is_active": true}
                   ]
                 }
                 """, for: request)
-            case "/api/models":
+            case (2, "/api/profiles/active"):
+                return apiTestJSONResponse(#"{"active": "work"}"#, for: request)
+            case (3, "/api/model/options"), (4, "/api/model/options"):
                 return apiTestJSONResponse("""
                 {
-                  "default_model": "\(profileDefault)",
-                  "groups": [
+                  "model": "\(profileDefault)",
+                  "provider": "openrouter",
+                  "providers": [
                     {
+                      "slug": "openrouter",
                       "name": "OpenRouter",
-                      "provider_id": "openrouter",
-                      "models": [{"id": "\(profileDefault)", "name": "DeepSeek Chat v3 Free"}]
+                      "models": ["\(profileDefault)"],
+                      "capabilities": { "\(profileDefault)": { "reasoning": true, "fast": true } }
                     },
                     {
+                      "slug": "openai",
                       "name": "OpenAI",
-                      "provider_id": "openai",
-                      "models": [{"id": "\(sessionModel)", "name": "GPT 5.5"}]
+                      "models": ["\(sessionModel)"],
+                      "capabilities": { "\(sessionModel)": { "reasoning": true } }
                     }
                   ]
                 }
                 """, for: request)
-            case "/api/reasoning":
-                let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
-                reasoningQueryItems = Dictionary(
-                    uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) }
-                )
-                return apiTestJSONResponse("""
-                {
-                  "reasoning_effort": "high",
-                  "supported_efforts": ["low", "medium", "high"],
-                  "supports_reasoning_effort": true
-                }
-                """, for: request)
-            case "/api/workspaces":
-                return apiTestJSONResponse(#"{"workspaces": [{"path": "/tmp/workspace"}]}"#, for: request)
-            case "/api/commands":
-                return apiTestJSONResponse(#"{"commands": []}"#, for: request)
-            case "/api/default-model":
-                XCTFail("Composer configuration loading must not save profile defaults.")
-                throw URLError(.badURL)
+            case (5, "/api/fs/default-cwd"):
+                return apiTestJSONResponse(#"{"cwd": "/tmp/workspace"}"#, for: request)
             default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                XCTFail("Unexpected request \(requestCount): \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
             }
         }
@@ -153,31 +159,42 @@ final class ChatComposerConfigLoaderTests: APIClientTestCase {
         XCTAssertEqual(result.state.currentModel, sessionModel)
         XCTAssertEqual(result.state.currentModelProvider, "openai")
         XCTAssertEqual(result.state.selectedProfileName, "work")
-        XCTAssertEqual(result.state.selectedReasoningEffort, "high")
-        // The reasoning query is scoped to the session's model/provider so the
-        // gating fields are model-accurate (issue #18).
-        XCTAssertEqual(reasoningQueryItems["model"], sessionModel)
-        XCTAssertEqual(reasoningQueryItems["provider"], "openai")
-        XCTAssertEqual(result.state.supportedReasoningEfforts, ["low", "medium", "high"])
+        // The native /api/model/options-derived reasoning never seeds the
+        // locally-selected effort; it only surfaces the model-aware gating.
+        XCTAssertNil(result.state.selectedReasoningEffort)
+        XCTAssertEqual(
+            Set(result.state.supportedReasoningEfforts ?? []),
+            ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+        )
         XCTAssertEqual(result.state.supportsReasoningEffort, true)
+        XCTAssertEqual(requestPaths, [
+            "/api/profiles",
+            "/api/profiles/active",
+            "/api/model/options",
+            "/api/model/options",
+            "/api/fs/default-cwd"
+        ])
     }
 
     func testLoadReturnsPartialStateWhenConfigurationFails() async throws {
         var requestPaths: [String] = []
+        var requestCount = 0
         let client = makeClient { request in
+            requestCount += 1
             requestPaths.append(request.url?.path ?? "")
 
-            switch request.url?.path {
-            case "/api/profiles":
+            switch (requestCount, request.url?.path) {
+            case (1, "/api/profiles"):
                 return apiTestJSONResponse("""
                 {
-                  "active": "default",
                   "profiles": [
                     {"name": "default", "model": "gpt-5.4", "provider": "openai", "is_default": true}
                   ]
                 }
                 """, for: request)
-            case "/api/models":
+            case (2, "/api/profiles/active"):
+                return apiTestJSONResponse(#"{"active": "default"}"#, for: request)
+            case (3, "/api/model/options"):
                 let response = HTTPURLResponse(
                     url: try XCTUnwrap(request.url),
                     statusCode: 500,
@@ -186,7 +203,7 @@ final class ChatComposerConfigLoaderTests: APIClientTestCase {
                 )
                 return (try XCTUnwrap(response), Data(#"{"error":"models unavailable"}"#.utf8))
             default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                XCTFail("Unexpected request \(requestCount): \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
             }
         }
@@ -200,32 +217,47 @@ final class ChatComposerConfigLoaderTests: APIClientTestCase {
         XCTAssertEqual(result.state.profileOptions.map(\.name), ["default"])
         XCTAssertEqual(result.state.currentModel, "gpt-5.4")
         XCTAssertNil(result.state.currentModelProvider)
-        XCTAssertEqual(requestPaths, ["/api/profiles", "/api/models"])
+        XCTAssertEqual(requestPaths, ["/api/profiles", "/api/profiles/active", "/api/model/options"])
     }
 
     func testLoadStoresSingleProfileModeFromProfilesResponse() async throws {
+        var requestCount = 0
         let client = makeClient { request in
-            switch request.url?.path {
-            case "/api/profiles":
+            requestCount += 1
+
+            switch (requestCount, request.url?.path) {
+            case (1, "/api/profiles"):
+                // Even when the server marks single_profile_mode, the native
+                // mapper does not surface it through the /api/profiles list.
                 return apiTestJSONResponse("""
                 {
-                  "active": "default",
                   "profiles": [
                     {"name": "default", "model": "gpt-5.4", "provider": "openai", "is_default": true, "is_active": true}
                   ],
                   "single_profile_mode": true
                 }
                 """, for: request)
-            case "/api/models":
-                return apiTestJSONResponse(#"{"default_model": "gpt-5.4", "groups": []}"#, for: request)
-            case "/api/reasoning":
-                return apiTestJSONResponse(#"{"reasoning_effort": "medium"}"#, for: request)
-            case "/api/workspaces":
-                return apiTestJSONResponse(#"{"workspaces": [], "last": null}"#, for: request)
-            case "/api/commands":
-                return apiTestJSONResponse(#"{"commands": []}"#, for: request)
+            case (2, "/api/profiles/active"):
+                return apiTestJSONResponse(#"{"active": "default"}"#, for: request)
+            case (3, "/api/model/options"), (4, "/api/model/options"):
+                return apiTestJSONResponse("""
+                {
+                  "model": "gpt-5.4",
+                  "provider": "openai",
+                  "providers": [
+                    {
+                      "slug": "openai",
+                      "name": "OpenAI",
+                      "models": ["gpt-5.4"],
+                      "capabilities": { "gpt-5.4": { "reasoning": true } }
+                    }
+                  ]
+                }
+                """, for: request)
+            case (5, "/api/fs/default-cwd"):
+                return apiTestJSONResponse(#"{"cwd": "/tmp"}"#, for: request)
             default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                XCTFail("Unexpected request \(requestCount): \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
             }
         }
@@ -235,7 +267,9 @@ final class ChatComposerConfigLoaderTests: APIClientTestCase {
         )
 
         XCTAssertNil(result.configurationError)
-        XCTAssertTrue(result.state.isSingleProfileMode)
+        // The native REST profiles mapping never carries single_profile_mode, so
+        // the composer keeps the default multi-profile mode.
+        XCTAssertFalse(result.state.isSingleProfileMode)
     }
 }
 

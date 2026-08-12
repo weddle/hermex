@@ -45,7 +45,7 @@ final class MessageActionContextTests: XCTestCase {
         XCTAssertEqual(context.keepCountThroughMessage, 30)
         XCTAssertEqual(context.messageID, "message-29")
         XCTAssertEqual(context.copyText, "## Result\n\nUse `xcodebuild test`.")
-        XCTAssertEqual(context.listenText, "Result\n\nUse xcodebuild test.")
+        XCTAssertEqual(context.listenText, "Result\nUse xcodebuild test.")
     }
 
     func testAssistantListenTextNormalizesCommonMarkdown() throws {
@@ -67,7 +67,7 @@ final class MessageActionContextTests: XCTestCase {
 
         XCTAssertEqual(
             context.listenText,
-            "Summary\n\nOpen Hermes\nThen run xcodebuild test."
+            "Summary\nOpen Hermes\nThen run xcodebuild test."
         )
     }
 

@@ -13,18 +13,21 @@ final class ChatAttachmentCoordinatorTests: APIClientTestCase {
 
     func testUploadSuccessAddsPendingAttachmentAndPreparesLocalPreview() async throws {
         let imageData = try XCTUnwrap(Self.imageData())
-        var uploadedFilename: String?
+        var uploadedJSON: [String: Any]?
         let client = makeClient { request in
             XCTAssertEqual(request.url?.path, "/api/upload")
-            uploadedFilename = try Self.multipartFilename(from: request)
+            uploadedJSON = try apiTestJSONBody(from: request)
             return apiTestJSONResponse(
                 """
                 {
-                  "filename": "photo.png",
+                  "ok": true,
                   "path": "/tmp/workspace/photo.png",
-                  "size": \(imageData.count),
-                  "mime": "image/png",
-                  "is_image": true
+                  "entry": {
+                    "name": "photo.png",
+                    "path": "/tmp/workspace/photo.png",
+                    "size": \(imageData.count),
+                    "mime_type": "image/png"
+                  }
                 }
                 """,
                 for: request
@@ -34,7 +37,8 @@ final class ChatAttachmentCoordinatorTests: APIClientTestCase {
 
         await coordinator.uploadAttachment(data: imageData, filename: "/tmp/photo.png", previewData: imageData)
 
-        XCTAssertEqual(uploadedFilename, "photo.png")
+        // Native upload resolves the requested filename in the JSON `path` field.
+        XCTAssertEqual(uploadedJSON?["path"] as? String, "photo.png")
         XCTAssertNil(coordinator.uploadAttachmentErrorMessage)
         XCTAssertFalse(coordinator.isUploadingAttachment)
         let attachment = try XCTUnwrap(coordinator.pendingAttachments.first)
@@ -64,18 +68,23 @@ final class ChatAttachmentCoordinatorTests: APIClientTestCase {
                 return apiTestJSONResponse(
                     """
                     {
-                      "filename": "notes.txt",
+                      "ok": true,
                       "path": "/tmp/workspace/notes.txt",
-                      "size": 5,
-                      "mime": "text/plain",
-                      "is_image": false
+                      "entry": {
+                        "name": "notes.txt",
+                        "path": "/tmp/workspace/notes.txt",
+                        "size": 5,
+                        "mime_type": "text/plain"
+                      }
                     }
                     """,
                     for: request
                 )
             }
 
-            return apiTestJSONResponse(#"{"error":"Upload failed."}"#, for: request)
+            // Native upload rejections carry `ok: false`; only then does the
+            // uploadFile decode surface an error instead of a usable path.
+            return apiTestJSONResponse(#"{"ok": false}"#, for: request)
         }
         let coordinator = makeCoordinator(client: client)
 
@@ -85,7 +94,7 @@ final class ChatAttachmentCoordinatorTests: APIClientTestCase {
         XCTAssertEqual(uploadCount, 2)
         XCTAssertEqual(coordinator.pendingAttachments.count, 1)
         XCTAssertEqual(coordinator.pendingAttachments.first?.name, "notes.txt")
-        XCTAssertEqual(coordinator.uploadAttachmentErrorMessage, "Upload failed.")
+        XCTAssertEqual(coordinator.uploadAttachmentErrorMessage, "The server rejected the upload.")
     }
 
     func testConcurrentUploadsKeepUploadingStateUntilAllUploadsFinish() async throws {
@@ -94,17 +103,21 @@ final class ChatAttachmentCoordinatorTests: APIClientTestCase {
 
         let client = makeDeferredUploadClient { request, protocolClient in
             XCTAssertEqual(request.url?.path, "/api/upload")
-            let filename = try Self.multipartFilename(from: request)
+            let json = try apiTestJSONBody(from: request)
+            let filename = try XCTUnwrap(json["path"] as? String)
             let uploadIndex = uploadState.nextUploadIndex()
 
             let response = apiTestJSONResponse(
                 """
                 {
-                  "filename": "\(filename)",
+                  "ok": true,
                   "path": "/tmp/workspace/\(filename)",
-                  "size": 4,
-                  "mime": "text/plain",
-                  "is_image": false
+                  "entry": {
+                    "name": "\(filename)",
+                    "path": "/tmp/workspace/\(filename)",
+                    "size": 4,
+                    "mime_type": "text/plain"
+                  }
                 }
                 """,
                 for: request
@@ -147,15 +160,19 @@ final class ChatAttachmentCoordinatorTests: APIClientTestCase {
 
     func testRemovePendingAttachmentRemovesOnlyMatchingAttachment() async throws {
         let client = makeClient { request in
-            let filename = try apiTestMultipartFilename(from: request)
+            let json = try apiTestJSONBody(from: request)
+            let filename = try XCTUnwrap(json["path"] as? String)
             return apiTestJSONResponse(
                 """
                 {
-                  "filename": "\(filename)",
+                  "ok": true,
                   "path": "/tmp/workspace/\(filename)",
-                  "size": 4,
-                  "mime": "text/plain",
-                  "is_image": false
+                  "entry": {
+                    "name": "\(filename)",
+                    "path": "/tmp/workspace/\(filename)",
+                    "size": 4,
+                    "mime_type": "text/plain"
+                  }
                 }
                 """,
                 for: request
@@ -201,11 +218,11 @@ final class ChatAttachmentCoordinatorTests: APIClientTestCase {
         let sessionID = "session-abc"
         let client = makeAuthenticatedMediaClient { request in
             XCTAssertEqual(request.httpMethod, "GET")
-            XCTAssertEqual(request.url?.path, "/api/media")
+            XCTAssertEqual(request.url?.path, "/api/files/download")
 
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
-            XCTAssertEqual(query["session_id"], sessionID)
+            XCTAssertNil(query["session_id"])
             XCTAssertEqual(query["path"], mediaPath)
 
             let response = HTTPURLResponse(
@@ -231,11 +248,11 @@ final class ChatAttachmentCoordinatorTests: APIClientTestCase {
         let sessionID = "session-abc"
         let client = makeAuthenticatedMediaClient { request in
             XCTAssertEqual(request.httpMethod, "GET")
-            XCTAssertEqual(request.url?.path, "/api/media")
+            XCTAssertEqual(request.url?.path, "/api/files/download")
 
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
-            XCTAssertEqual(query["session_id"], sessionID)
+            XCTAssertNil(query["session_id"])
             XCTAssertEqual(query["path"], mediaPath)
 
             let response = HTTPURLResponse(
@@ -351,16 +368,6 @@ final class ChatAttachmentCoordinatorTests: APIClientTestCase {
             UIColor.systemBlue.setFill()
             context.fill(CGRect(x: 0, y: 0, width: 24, height: 24))
         }
-    }
-
-    private static func multipartFilename(from request: URLRequest) throws -> String {
-        let data = try XCTUnwrap(apiTestBodyData(from: request))
-        let marker = Data("filename=\"".utf8)
-        let quote = Data("\"".utf8)
-        let markerRange = try XCTUnwrap(data.range(of: marker))
-        let filenameStart = markerRange.upperBound
-        let filenameEnd = try XCTUnwrap(data[filenameStart...].range(of: quote)).lowerBound
-        return String(decoding: data[filenameStart..<filenameEnd], as: UTF8.self)
     }
 }
 

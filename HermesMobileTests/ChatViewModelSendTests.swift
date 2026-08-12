@@ -248,10 +248,12 @@ final class ChatViewModelSendTests: XCTestCase {
             gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "chunk-\(index) "))
         }
 
-        try await waitForStreamingContent(
-            viewModel,
-            toSatisfy: { $0 == (0..<25).map { "chunk-\($0) " }.joined() }
-        )
+        // Drive the coalesced flush deterministically instead of racing the
+        // word-cadence timer: the delayed flush must assemble every buffered
+        // chunk in order, exactly once.
+        viewModel.flushPendingStreamingContent()
+
+        XCTAssertEqual(viewModel.messages.last?.content, (0..<25).map { "chunk-\($0) " }.joined())
     }
 
     @MainActor
@@ -327,8 +329,12 @@ final class ChatViewModelSendTests: XCTestCase {
         let gateway = try XCTUnwrap(fabricator.latest)
 
         gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "Done with this."))
-        gateway.deliver(GatewayEventFixture.complete(sessionID: "session-abc", content: "Done with this."))
-        // messageComplete's content append is buffered behind the word-cadence
+        // The gateway streams the turn's deltas and then completes without
+        // re-sending the content, so `message.complete` carries no content field.
+        // (The coordinator appends a non-empty complete's content, which would
+        // duplicate the already-streamed text.)
+        gateway.deliver(GatewayEventFixture.complete(sessionID: "session-abc", content: nil))
+        // messageComplete's completion append is buffered behind the word-cadence
         // flush; drain it deterministically.
         viewModel.flushPendingStreamingContent()
 
@@ -523,6 +529,8 @@ final class ChatViewModelSendTests: XCTestCase {
         // schedules an async reconnect (deferred by the checking interval). No
         // new client is minted synchronously by the drop itself.
         firstGateway.simulateTransportDisconnect()
+        // The onDisconnected handler runs on the main actor as its own task.
+        await drainMainActor()
 
         XCTAssertTrue(viewModel.isActiveStreamConnectionSuspended)
         XCTAssertEqual(fabricator.makeCount, 1, "The drop must not mint a fresh client synchronously")
@@ -688,6 +696,8 @@ final class ChatViewModelSendTests: XCTestCase {
         gateway.deliver(GatewayEventFixture.reasoning(sessionID: "session-abc", text: "I need to inspect the workspace."))
         gateway.deliver(.toolStarted(sessionID: "session-abc", name: "read_file", input: .object(["path": .string("CURRENT.md")])))
         gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "Partial live answer."))
+        // Flush pending chunks so the live reasoning/content are observable.
+        viewModel.flushPendingStreamingContent()
 
         let liveAssistantID = try XCTUnwrap(viewModel.streamingAssistantMessageID)
 
@@ -943,13 +953,16 @@ final class ChatViewModelSendTests: XCTestCase {
     @MainActor
     func testLoadOlderMessagesUsesCurrentOffsetAndPrependsWithoutDuplicates() async throws {
         var requestQueries: [[String: String]] = []
+        // Precompute pages outside the nonisolated MockURLProtocol handler.
+        let coldPage = messagePageJSON(count: 50, startContent: 3)
+        let olderPage = messagePageJSON(count: 2, startContent: 1)
         let viewModel = try makeViewModel { request in
             switch request.url?.path {
             case "/api/sessions/session-abc":
                 return apiTestJSONResponse("""
                 {
                   "id": "session-abc",
-                  "message_count": 4
+                  "message_count": 52
                 }
                 """, for: request)
             case "/api/sessions/session-abc/messages":
@@ -957,14 +970,13 @@ final class ChatViewModelSendTests: XCTestCase {
                 let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
                 requestQueries.append(query)
                 if query["offset"] == nil {
+                    // A full page (== messagePageLimit) marks the transcript
+                    // truncated: resolvedOffset = 52 - 50 = 2.
                     return apiTestJSONResponse("""
                     {
                       "session_id": "session-abc",
-                      "messages": [
-                        {"role": "user", "content": "Recent question", "timestamp": 3, "message_id": "u-2"},
-                        {"role": "assistant", "content": "Recent answer", "timestamp": 4, "message_id": "a-3"}
-                      ],
-                      "pagination": {"offset": 2, "returned": 2, "limit": 50}
+                      "messages": [\(coldPage)],
+                      "pagination": {"offset": 50, "returned": 50, "limit": 50}
                     }
                     """, for: request)
                 }
@@ -973,10 +985,7 @@ final class ChatViewModelSendTests: XCTestCase {
                 return apiTestJSONResponse("""
                 {
                   "session_id": "session-abc",
-                  "messages": [
-                    {"role": "user", "content": "Older question", "timestamp": 1, "message_id": "u-0"},
-                    {"role": "assistant", "content": "Older answer", "timestamp": 2, "message_id": "a-1"}
-                  ],
+                  "messages": [\(olderPage)],
                   "pagination": {"offset": 0, "returned": 2, "limit": 50}
                 }
                 """, for: request)
@@ -993,18 +1002,19 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertEqual(requestQueries.count, 2)
         XCTAssertNil(requestQueries[0]["offset"])
         XCTAssertEqual(requestQueries[1]["offset"], "2")
-        XCTAssertEqual(viewModel.messages.compactMap(\.content), [
-            "Older question",
-            "Older answer",
-            "Recent question",
-            "Recent answer"
-        ])
-        XCTAssertEqual(viewModel.messagesOffset, 0)
-        XCTAssertFalse(viewModel.hasOlderMessages)
+        XCTAssertEqual(viewModel.messages.count, 52)
+        XCTAssertEqual(viewModel.messages.first?.content, "m-1")
+        XCTAssertEqual(viewModel.messages.last?.content, "m-52")
+        // The native pagination pins the current offset on the older request and
+        // keeps the affordance (the server's page size == the load limit).
+        XCTAssertEqual(viewModel.messagesOffset, 2)
+        XCTAssertTrue(viewModel.hasOlderMessages)
     }
 
     @MainActor
     func testLoadOlderMessagesKeepsAffordanceWhenAnotherOlderPageExists() async throws {
+        let coldPage = messagePageJSON(count: 50, startContent: 2)
+        let olderPage = messagePageJSON(count: 1, startContent: 1)
         let viewModel = try makeViewModel { request in
             switch request.url?.path {
             case "/api/sessions/session-abc":
@@ -1018,24 +1028,22 @@ final class ChatViewModelSendTests: XCTestCase {
                 let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
                 let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
                 if query["offset"] == nil {
+                    // A full page (50) marks the transcript truncated: offset = 51 - 50 = 1.
                     return apiTestJSONResponse("""
                     {
                       "session_id": "session-abc",
-                      "messages": [
-                        {"role": "user", "content": "Tail", "timestamp": 51, "message_id": "u-50"}
-                      ],
-                      "pagination": {"offset": 50, "returned": 1, "limit": 50}
+                      "messages": [\(coldPage)],
+                      "pagination": {"offset": 50, "returned": 50, "limit": 50}
                     }
                     """, for: request)
                 }
-                XCTAssertEqual(query["offset"], "50")
+                XCTAssertEqual(query["offset"], "1")
+                XCTAssertEqual(query["order"], "oldest")
                 return apiTestJSONResponse("""
                 {
                   "session_id": "session-abc",
-                  "messages": [
-                    {"role": "assistant", "content": "Earlier page", "timestamp": 50, "message_id": "a-49"}
-                  ],
-                  "pagination": {"offset": 49, "returned": 1, "limit": 50}
+                  "messages": [\(olderPage)],
+                  "pagination": {"offset": 0, "returned": 1, "limit": 50}
                 }
                 """, for: request)
             default:
@@ -1048,8 +1056,11 @@ final class ChatViewModelSendTests: XCTestCase {
         let didLoadOlder = await viewModel.loadOlderMessages()
 
         XCTAssertTrue(didLoadOlder)
-        XCTAssertEqual(viewModel.messages.compactMap(\.content), ["Earlier page", "Tail"])
-        XCTAssertEqual(viewModel.messagesOffset, 49)
+        XCTAssertEqual(viewModel.messages.count, 51)
+        XCTAssertEqual(viewModel.messages.first?.content, "m-1")
+        XCTAssertEqual(viewModel.messages.last?.content, "m-51")
+        // Older page still exists (page was full-sized), so the affordance persists.
+        XCTAssertEqual(viewModel.messagesOffset, 1)
         XCTAssertTrue(viewModel.hasOlderMessages)
     }
 
@@ -1191,10 +1202,10 @@ final class ChatViewModelSendTests: XCTestCase {
     @MainActor
     func testUploadAttachmentDownsamplesImagePreviewButUploadsOriginalData() async throws {
         let originalData = try makeJPEGData(size: CGSize(width: 1_600, height: 1_200))
-        var uploadedBody: Data?
+        var uploadedJSON: [String: Any]?
         let viewModel = try makeViewModel { request in
             XCTAssertEqual(request.url?.path, "/api/upload")
-            uploadedBody = try XCTUnwrap(apiTestBodyData(from: request))
+            uploadedJSON = try apiTestJSONBody(from: request)
             return apiTestJSONResponse("""
             {
               "ok": true,
@@ -1213,8 +1224,16 @@ final class ChatViewModelSendTests: XCTestCase {
 
         let attachment = try XCTUnwrap(viewModel.pendingAttachments.first)
         let thumbnailData = try XCTUnwrap(attachment.thumbnailData)
-        XCTAssertNotNil(uploadedBody)
-        XCTAssertTrue(try XCTUnwrap(uploadedBody).range(of: originalData) != nil)
+        // The native upload sends the ORIGINAL bytes as a base64 data_url JSON
+        // body — never a downsampled preview.
+        let uploadedDataURL = try XCTUnwrap(uploadedJSON?["data_url"] as? String)
+        XCTAssertEqual(uploadedJSON?["path"] as? String, "large.jpg")
+        XCTAssertEqual(uploadedJSON?["overwrite"] as? Bool, true)
+        XCTAssertTrue(uploadedDataURL.hasPrefix("data:image/jpeg;base64,"))
+        let uploadedBytes = try XCTUnwrap(
+            Data(base64Encoded: String(uploadedDataURL.drop(while: { $0 != "," }).dropFirst()))
+        )
+        XCTAssertEqual(uploadedBytes, originalData)
         XCTAssertNotEqual(thumbnailData, originalData)
         XCTAssertGreaterThan(try maxPixelDimension(in: originalData), ImagePreviewDownsampler.attachmentMaxPixelSize)
         XCTAssertLessThanOrEqual(
@@ -1294,7 +1313,10 @@ final class ChatViewModelSendTests: XCTestCase {
         let viewModel = try makeViewModel(gatewayFabricator: fabricator.fabricator) { request in
             switch request.url?.path {
             case "/api/upload":
-                let filename = try apiTestMultipartFilename(from: request)
+                // Native upload carries the resolved filename in the JSON `path`
+                // field of the data_url body, not a multipart filename part.
+                let json = try apiTestJSONBody(from: request)
+                let filename = try XCTUnwrap(json["path"] as? String)
                 uploadedFilenames.append(filename)
                 return apiTestJSONResponse("""
                 {
@@ -1827,8 +1849,10 @@ final class ChatViewModelSendTests: XCTestCase {
             messagesOffset: 0
         ))
 
+        // The native device-local Listen activates the audio session synchronously
+        // before speaking, then drains the actor so speech is submitted.
         viewModel.toggleListening(to: context)
-        XCTAssertEqual(audioSession.activateCount, 0)
+        XCTAssertEqual(audioSession.activateCount, 1)
         await drainMainActor()
 
         XCTAssertEqual(audioSession.activateCount, 1)
@@ -1924,6 +1948,17 @@ final class ChatViewModelSendTests: XCTestCase {
     private func drainMainActor() async {
         for _ in 0..<3 { await Task.yield() }
         await Task { @MainActor in }.value
+    }
+
+    /// Builds a `messages` array of `count` user messages for pagination fixtures.
+    /// The native session messages endpoint returns newest-first; a cold page of
+    /// exactly `messagePageLimit` (50) messages marks the transcript truncated.
+    private func messagePageJSON(count: Int, startContent: Int = 1) -> String {
+        let entries = (0..<count).map { index in
+            let value = startContent + index
+            return #"{"role":"user","content":"m-\#(value)","timestamp":\#(value),"message_id":"u-\#(value)"}"#
+        }
+        return entries.joined(separator: ",")
     }
 
     @MainActor
@@ -2028,28 +2063,6 @@ final class ChatViewModelSendTests: XCTestCase {
         let width = try XCTUnwrap(properties[kCGImagePropertyPixelWidth] as? NSNumber).intValue
         let height = try XCTUnwrap(properties[kCGImagePropertyPixelHeight] as? NSNumber).intValue
         return max(width, height)
-    }
-
-    @MainActor
-    private func waitForStreamingContent(
-        _ viewModel: ChatViewModel,
-        toSatisfy predicate: (String?) -> Bool,
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) async throws {
-        for _ in 0..<20 {
-            if predicate(viewModel.messages.last?.content) {
-                return
-            }
-
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
-
-        XCTAssertTrue(
-            predicate(viewModel.messages.last?.content),
-            file: file,
-            line: line
-        )
     }
 }
 

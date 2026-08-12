@@ -12,28 +12,27 @@ final class APIClientUploadTests: APIClientTestCase {
             XCTAssertEqual(request.url?.path, "/api/upload")
             XCTAssertEqual(request.httpMethod, "POST")
 
-            let contentType = request.value(forHTTPHeaderField: "Content-Type")
-            XCTAssertNotNil(contentType)
-            XCTAssertTrue(contentType?.hasPrefix("multipart/form-data") == true)
-
             guard let body = apiTestBodyData(from: request) else {
                 XCTFail("Missing request body")
                 throw URLError(.badServerResponse)
             }
 
-            let bodyString = String(data: body, encoding: .utf8) ?? ""
-            XCTAssertTrue(bodyString.contains("Content-Disposition: form-data; name=\"session_id\""))
-            XCTAssertTrue(bodyString.contains("abc123"))
-            XCTAssertTrue(bodyString.contains("Content-Disposition: form-data; name=\"file\"; filename=\"test.jpg\""))
-            XCTAssertTrue(bodyString.contains("hello"))
+            let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+            XCTAssertEqual(json?["path"] as? String, "test.jpg")
+            XCTAssertEqual(json?["overwrite"] as? Bool, true)
+            XCTAssertTrue((json?["data_url"] as? String)?.hasPrefix("data:image/jpeg;base64,") == true)
+            XCTAssertEqual(json?["data_url"] as? String, "data:image/jpeg;base64," + Data("hello".utf8).base64EncodedString())
 
             return apiTestJSONResponse("""
             {
-              "filename": "test.jpg",
+              "ok": true,
               "path": "/tmp/workspace/test.jpg",
-              "size": 5,
-              "mime": "image/jpeg",
-              "is_image": true
+              "entry": {
+                "name": "test.jpg",
+                "path": "/tmp/workspace/test.jpg",
+                "size": 5,
+                "mime_type": "image/jpeg"
+              }
             }
             """, for: request)
         }

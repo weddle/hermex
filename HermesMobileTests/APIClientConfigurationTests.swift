@@ -149,31 +149,59 @@ final class APIClientConfigurationTests: APIClientTestCase {
         XCTAssertEqual(response.model, "@openai:gpt-5.4")
     }
 
+    @MainActor
     func testUpdateSessionModelBuildsExpectedBodyAndDecodesResponse() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/session/update")
-            XCTAssertEqual(request.httpMethod, "POST")
+        // updateSession now runs through the gateway: mint a ws-ticket, then
+        // config.set(model) + session.cwd.set(workspace) RPCs, then reloads the
+        // session detail via GET /api/sessions/{id}.
+        var rpcFrames: [String] = []
 
-            let data = try XCTUnwrap(apiTestBodyData(from: request))
-            let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            XCTAssertEqual(body?["session_id"] as? String, "session-abc")
-            XCTAssertEqual(body?["workspace"] as? String, "/tmp/workspace")
-            XCTAssertEqual(body?["model"] as? String, "@openai:gpt-5.5")
-            XCTAssertEqual(body?["model_provider"] as? String, "openai")
-            XCTAssertNil(body?["sessionId"])
-            XCTAssertNil(body?["modelProvider"])
-
-            return apiTestJSONResponse("""
-            {
-              "session": {
-                "session_id": "session-abc",
-                "workspace": "/tmp/workspace",
-                "model": "@openai:gpt-5.5",
-                "model_provider": "openai"
-              }
+        MockURLProtocol.requestHandler = { request in
+            switch request.url?.path {
+            case "/api/auth/ws-ticket":
+                return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
+            case "/api/sessions/session-abc":
+                return apiTestJSONResponse("""
+                {
+                  "id": "session-abc",
+                  "session_id": "session-abc",
+                  "model": "@openai:gpt-5.5",
+                  "model_provider": "openai"
+                }
+                """, for: request)
+            default:
+                XCTFail("Unexpected request: \(request.url?.path ?? "nil")")
+                return apiTestJSONResponse("{}", for: request)
             }
-            """, for: request)
         }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+
+        let client = APIClient(
+            baseURL: try XCTUnwrap(URL(string: "https://example.test")),
+            session: URLSession(configuration: configuration),
+            gatewayFabricator: { baseURL, ticket, profile, headers in
+                let gatewayClient = HermesGatewayClient(
+                    baseURL: baseURL,
+                    ticket: ticket,
+                    profile: profile,
+                    customHeaders: headers
+                )
+                gatewayClient.testSendFrame = { text in
+                    rpcFrames.append(text)
+                    // Auto-respond to every JSON-RPC request so the RPC awaits resolve.
+                    let pattern = #""id":\s*(\d+)"#
+                    let regex = try? NSRegularExpression(pattern: pattern)
+                    let range = NSRange(text.startIndex..<text.endIndex, in: text)
+                    guard let match = regex?.firstMatch(in: text, range: range),
+                          let idRange = Range(match.range(at: 1), in: text),
+                          let id = Int(text[idRange]) else { return }
+                    gatewayClient.testDeliverFrame(#"{"jsonrpc":"2.0","id":\#(id),"result":{}}"#)
+                }
+                return gatewayClient
+            }
+        )
 
         let response = try await client.updateSession(
             id: "session-abc",
@@ -182,9 +210,22 @@ final class APIClientConfigurationTests: APIClientTestCase {
             modelProvider: "openai"
         )
 
+        // The reloaded detail reflects the assigned model/provider.
         XCTAssertEqual(response.session?.sessionId, "session-abc")
         XCTAssertEqual(response.session?.model, "@openai:gpt-5.5")
         XCTAssertEqual(response.session?.modelProvider, "openai")
+
+        // Assert the gateway carried the model assignment and workspace change.
+        let setConfigFrame = try XCTUnwrap(rpcFrames.first { $0.contains("config.set") })
+        XCTAssertTrue(setConfigFrame.contains("\"key\":\"model\""), setConfigFrame)
+        XCTAssertTrue(setConfigFrame.contains("@openai:gpt-5.5"), setConfigFrame)
+        XCTAssertTrue(setConfigFrame.contains("--provider openai"), setConfigFrame)
+
+        let cwdFrame = try XCTUnwrap(rpcFrames.first { $0.contains("session.cwd.set") })
+        let cwdJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(cwdFrame.utf8)) as? [String: Any])
+        let cwdParams = try XCTUnwrap(cwdJSON["params"] as? [String: Any])
+        XCTAssertEqual(cwdParams["session_id"] as? String, "session-abc")
+        XCTAssertEqual(cwdParams["cwd"] as? String, "/tmp/workspace")
     }
 
     func testReasoningStatusBuildsExpectedPathAndDecodesEffort() async throws {
@@ -283,20 +324,19 @@ final class APIClientConfigurationTests: APIClientTestCase {
 
     func testRenameSessionBuildsExpectedBodyAndDecodesResponse() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/session/rename")
-            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.path, "/api/sessions/session-abc")
+            XCTAssertEqual(request.httpMethod, "PATCH")
 
             let data = try XCTUnwrap(apiTestBodyData(from: request))
             let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            XCTAssertEqual(body?["session_id"] as? String, "session-abc")
             XCTAssertEqual(body?["title"] as? String, "New Title")
+            XCTAssertNil(body?["session_id"])
 
             return apiTestJSONResponse("""
             {
-              "session": {
-                "session_id": "session-abc",
-                "title": "New Title"
-              }
+              "id": "session-abc",
+              "session_id": "session-abc",
+              "title": "New Title"
             }
             """, for: request)
         }

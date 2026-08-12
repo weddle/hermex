@@ -8,29 +8,36 @@ import UniformTypeIdentifiers
 
 final class APIClientSessionDetailTests: APIClientTestCase {
     func testSessionRequestBuildsExpectedQuery() async throws {
+        var requestedPaths: [String] = []
+        var queries: [[String: String?]] = []
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/session")
-
+            let path = request.url?.path ?? ""
+            requestedPaths.append(path)
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
-            XCTAssertEqual(query["session_id"], "abc123")
-            XCTAssertEqual(query["messages"], "1")
-            XCTAssertEqual(query["msg_limit"], "25")
-            XCTAssertEqual(query["msg_before"], "50")
-
-            return apiTestJSONResponse("""
-            {
-              "session": {
-                "session_id": "abc123",
-                "messages": [
-                  {"role": "user", "content": "Hello", "_ts": 1770000000},
-                  {"role": "assistant", "content": "Hi", "timestamp": 1770000001}
-                ],
-                "_messages_truncated": true,
-                "_messages_offset": 25
-              }
+            queries.append(query)
+            switch path {
+            case "/api/sessions/abc123":
+                return apiTestJSONResponse("""
+                {
+                  "session_id": "abc123",
+                  "message_count": 75
+                }
+                """, for: request)
+            case "/api/sessions/abc123/messages":
+                return apiTestJSONResponse("""
+                {
+                  "session_id": "abc123",
+                  "messages": [
+                    {"role": "user", "content": "Hello", "_ts": 1770000000},
+                    {"role": "assistant", "content": "Hi", "timestamp": 1770000001}
+                  ],
+                  "pagination": {"limit": 25, "offset": 50, "order": "oldest", "returned": 2}
+                }
+                """, for: request)
+            default:
+                throw URLError(.badURL)
             }
-            """, for: request)
         }
 
         let response = try await client.session(
@@ -40,25 +47,50 @@ final class APIClientSessionDetailTests: APIClientTestCase {
             messageBefore: 50
         )
 
+        XCTAssertEqual(requestedPaths, ["/api/sessions/abc123", "/api/sessions/abc123/messages"])
+        // The row route carries no query; the messages route pages by
+        // `limit`+`offset`+`order` (oldest), with `messageBefore` as the offset.
+        XCTAssertEqual(queries[0], [:])
+        XCTAssertEqual(queries[1], ["limit": "25", "offset": "50", "order": "oldest"])
         XCTAssertEqual(response.session?.sessionId, "abc123")
         XCTAssertEqual(response.session?.messages?.count, 2)
         XCTAssertEqual(response.session?.messages?.first?.timestamp, 1_770_000_000)
+        // An explicit offset page is truncated.
         XCTAssertEqual(response.session?.messagesTruncated, true)
-        XCTAssertEqual(response.session?.messagesOffset, 25)
+        XCTAssertEqual(response.session?.messagesOffset, 50)
     }
 
     func testSessionColdLoadSendsExpandRenderableFlag() async throws {
+        var requestedPaths: [String] = []
         let client = makeClient { request in
+            let path = request.url?.path ?? ""
+            requestedPaths.append(path)
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
-            XCTAssertEqual(query["session_id"], "abc123")
-            XCTAssertEqual(query["msg_limit"], "50")
-            XCTAssertEqual(query["expand_renderable"], "1")
-            XCTAssertNil(query["msg_before"])
-
-            return apiTestJSONResponse("""
-            { "session": { "session_id": "abc123" } }
-            """, for: request)
+            switch path {
+            case "/api/sessions/abc123":
+                XCTAssertEqual(query, [:])
+                return apiTestJSONResponse("""
+                { "session_id": "abc123", "message_count": 3 }
+                """, for: request)
+            case "/api/sessions/abc123/messages":
+                // A cold load with no offset requests the latest 50 in
+                // chronological order — no expand_renderable knob on the native
+                // surface, and no offset/order when messageBefore is nil.
+                XCTAssertEqual(query, ["limit": "50"])
+                XCTAssertNil(query["expand_renderable"])
+                XCTAssertNil(query["offset"])
+                XCTAssertNil(query["order"])
+                return apiTestJSONResponse("""
+                {
+                  "session_id": "abc123",
+                  "messages": [],
+                  "pagination": {"limit": 50, "offset": 0, "returned": 0}
+                }
+                """, for: request)
+            default:
+                throw URLError(.badURL)
+            }
         }
 
         _ = try await client.session(
@@ -67,18 +99,35 @@ final class APIClientSessionDetailTests: APIClientTestCase {
             messageLimit: 50,
             expandRenderable: true
         )
+
+        XCTAssertEqual(requestedPaths, ["/api/sessions/abc123", "/api/sessions/abc123/messages"])
     }
 
     func testSessionLoadEarlierOmitsExpandRenderableFlag() async throws {
+        var requestedPaths: [String] = []
+        var queries: [[String: String?]] = []
         let client = makeClient { request in
+            let path = request.url?.path ?? ""
+            requestedPaths.append(path)
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
-            XCTAssertEqual(query["msg_before"], "100")
-            XCTAssertNil(query["expand_renderable"])
-
-            return apiTestJSONResponse("""
-            { "session": { "session_id": "abc123" } }
-            """, for: request)
+            queries.append(query)
+            switch path {
+            case "/api/sessions/abc123":
+                return apiTestJSONResponse("""
+                { "session_id": "abc123", "message_count": 150 }
+                """, for: request)
+            case "/api/sessions/abc123/messages":
+                return apiTestJSONResponse("""
+                {
+                  "session_id": "abc123",
+                  "messages": [],
+                  "pagination": {"limit": 50, "offset": 100, "order": "oldest", "returned": 0}
+                }
+                """, for: request)
+            default:
+                throw URLError(.badURL)
+            }
         }
 
         _ = try await client.session(
@@ -87,102 +136,147 @@ final class APIClientSessionDetailTests: APIClientTestCase {
             messageLimit: 50,
             messageBefore: 100
         )
+
+        XCTAssertEqual(requestedPaths, ["/api/sessions/abc123", "/api/sessions/abc123/messages"])
+        // Loading earlier pages maps messageBefore to offset + oldest order, and
+        // never carries the removed expand_renderable knob.
+        XCTAssertEqual(queries[1], ["limit": "50", "offset": "100", "order": "oldest"])
+        XCTAssertNil(queries[1]["expand_renderable"])
     }
 
     func testSessionDecodesPersistedToolCalls() async throws {
+        var requestedPaths: [String] = []
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/session")
-
-            return apiTestJSONResponse("""
-            {
-              "session": {
-                "session_id": "abc123",
-                "messages": [
-                  {"role": "assistant", "content": "I checked the file.", "_ts": 1770000000}
-                ],
-                "tool_calls": [
-                  {
-                    "name": "read_file",
-                    "snippet": "let value = 42",
-                    "tid": "call_123",
-                    "assistant_msg_idx": 12,
-                    "args": {
-                      "path": "/tmp/example.swift",
-                      "limit": 120
+            let path = request.url?.path ?? ""
+            requestedPaths.append(path)
+            switch path {
+            case "/api/sessions/abc123":
+                return apiTestJSONResponse("""
+                { "session_id": "abc123" }
+                """, for: request)
+            case "/api/sessions/abc123/messages":
+                // Native surface has no session-level `tool_calls` field — tool
+                // invocations live on the assistant message (OpenAI tool_calls
+                // shape), and the tolerant ChatMessage decode preserves them as
+                // JSONValue toolCalls for ToolCallGroup to render.
+                return apiTestJSONResponse("""
+                {
+                  "session_id": "abc123",
+                  "messages": [
+                    {
+                      "role": "assistant",
+                      "content": "I checked the file.",
+                      "_ts": 1770000000,
+                      "tool_calls": [
+                        {
+                          "id": "call_123",
+                          "function": {
+                            "name": "read_file",
+                            "arguments": "{\\"path\\": \\"/tmp/example.swift\\", \\"limit\\": 120}"
+                          }
+                        }
+                      ]
                     }
-                  }
-                ],
-                "_messages_offset": 12
-              }
+                  ],
+                  "pagination": {"limit": 50, "returned": 1}
+                }
+                """, for: request)
+            default:
+                throw URLError(.badURL)
             }
-            """, for: request)
         }
 
         let response = try await client.session(id: "abc123")
-        let toolCall = try XCTUnwrap(response.session?.toolCalls?.first)
+        let message = try XCTUnwrap(response.session?.messages?.first)
+        let toolCall = try XCTUnwrap(message.toolCalls?.first)
 
-        XCTAssertEqual(toolCall.name, "read_file")
-        XCTAssertEqual(toolCall.snippet, "let value = 42")
-        XCTAssertEqual(toolCall.tid, "call_123")
-        XCTAssertEqual(toolCall.assistantMsgIdx, 12)
-        XCTAssertEqual(toolCall.args?["path"], .string("/tmp/example.swift"))
-        XCTAssertEqual(toolCall.args?["limit"], .number(120))
+        XCTAssertEqual(requestedPaths, ["/api/sessions/abc123", "/api/sessions/abc123/messages"])
+        XCTAssertEqual(
+            toolCall,
+            .object([
+                "id": .string("call_123"),
+                "function": .object([
+                    "name": .string("read_file"),
+                    "arguments": .string(#"{"path": "/tmp/example.swift", "limit": 120}"#)
+                ])
+            ])
+        )
     }
 
     func testSessionDecodesPersistedAssistantReasoning() async throws {
+        var requestedPaths: [String] = []
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/session")
-
-            return apiTestJSONResponse("""
-            {
-              "session": {
-                "session_id": "abc123",
-                "messages": [
-                  {
-                    "role": "assistant",
-                    "content": "The file defines a SwiftUI view.",
-                    "reasoning": "I inspected the file and looked for the main type.",
-                    "_ts": 1770000000
-                  }
-                ]
-              }
+            let path = request.url?.path ?? ""
+            requestedPaths.append(path)
+            switch path {
+            case "/api/sessions/abc123":
+                return apiTestJSONResponse("""
+                { "session_id": "abc123" }
+                """, for: request)
+            case "/api/sessions/abc123/messages":
+                return apiTestJSONResponse("""
+                {
+                  "session_id": "abc123",
+                  "messages": [
+                    {
+                      "role": "assistant",
+                      "content": "The file defines a SwiftUI view.",
+                      "reasoning": "I inspected the file and looked for the main type.",
+                      "_ts": 1770000000
+                    }
+                  ],
+                  "pagination": {"limit": 50, "returned": 1}
+                }
+                """, for: request)
+            default:
+                throw URLError(.badURL)
             }
-            """, for: request)
         }
 
         let response = try await client.session(id: "abc123")
         let message = try XCTUnwrap(response.session?.messages?.first)
 
+        XCTAssertEqual(requestedPaths, ["/api/sessions/abc123", "/api/sessions/abc123/messages"])
         XCTAssertEqual(message.reasoning, "I inspected the file and looked for the main type.")
     }
 
     func testSessionDecodesMessageAttachments() async throws {
+        var requestedPaths: [String] = []
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/session")
-
-            return apiTestJSONResponse("""
-            {
-              "session": {
-                "session_id": "abc123",
-                "messages": [
-                  {
-                    "role": "user",
-                    "content": "Please analyze this",
-                    "_ts": 1770000000,
-                    "attachments": [
-                      {"name": "report.pdf", "path": "/uploads/abc123/report.pdf", "mime": "application/pdf", "size": 1024},
-                      {"name": "image.jpg", "path": "/uploads/abc123/image.jpg", "mime": "image/jpeg", "size": 2048, "is_image": true}
-                    ]
-                  }
-                ]
-              }
+            let path = request.url?.path ?? ""
+            requestedPaths.append(path)
+            switch path {
+            case "/api/sessions/abc123":
+                return apiTestJSONResponse("""
+                { "session_id": "abc123" }
+                """, for: request)
+            case "/api/sessions/abc123/messages":
+                return apiTestJSONResponse("""
+                {
+                  "session_id": "abc123",
+                  "messages": [
+                    {
+                      "role": "user",
+                      "content": "Please analyze this",
+                      "_ts": 1770000000,
+                      "attachments": [
+                        {"name": "report.pdf", "path": "/uploads/abc123/report.pdf", "mime": "application/pdf", "size": 1024},
+                        {"name": "image.jpg", "path": "/uploads/abc123/image.jpg", "mime": "image/jpeg", "size": 2048, "is_image": true}
+                      ]
+                    }
+                  ],
+                  "pagination": {"limit": 50, "returned": 1}
+                }
+                """, for: request)
+            default:
+                throw URLError(.badURL)
             }
-            """, for: request)
         }
 
         let response = try await client.session(id: "abc123")
         let message = try XCTUnwrap(response.session?.messages?.first)
 
+        XCTAssertEqual(requestedPaths, ["/api/sessions/abc123", "/api/sessions/abc123/messages"])
         XCTAssertEqual(message.attachments?.count, 2)
         XCTAssertEqual(message.attachments?.first?.name, "report.pdf")
         XCTAssertEqual(message.attachments?.first?.path, "/uploads/abc123/report.pdf")
@@ -195,59 +289,69 @@ final class APIClientSessionDetailTests: APIClientTestCase {
     }
 
     func testSessionDecodesTolerantMessageAttachments() async throws {
+        var requestedPaths: [String] = []
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/session")
-
-            return apiTestJSONResponse("""
-            {
-              "session": {
-                "session_id": "abc123",
-                "messages": [
-                  {
-                    "role": "user",
-                    "content": "Normal attachments",
-                    "_ts": 1770000000,
-                    "attachments": [
-                      {"name": "report.pdf", "path": "/uploads/report.pdf", "mime": "application/pdf", "size": 1024},
-                      {"filename": "image.jpg", "path": "/uploads/image.jpg", "mime": "image/jpeg", "size": 2048, "is_image": true}
-                    ]
-                  },
-                  {
-                    "role": "user",
-                    "content": "Legacy bare string",
-                    "_ts": 1770000001,
-                    "attachments": ["legacy_file.txt"]
-                  },
-                  {
-                    "role": "user",
-                    "content": "Mixed quality",
-                    "_ts": 1770000002,
-                    "attachments": [
-                      {"name": "good.csv", "path": "/uploads/good.csv", "mime": "text/csv", "size": 42},
-                      12345,
-                      {"path": "/uploads/minimal.txt", "mime": "text/plain"}
-                    ]
-                  },
-                  {
-                    "role": "user",
-                    "content": "Null attachments",
-                    "_ts": 1770000003,
-                    "attachments": null
-                  },
-                  {
-                    "role": "user",
-                    "content": "No attachments key",
-                    "_ts": 1770000004
-                  }
-                ]
-              }
+            let path = request.url?.path ?? ""
+            requestedPaths.append(path)
+            switch path {
+            case "/api/sessions/abc123":
+                return apiTestJSONResponse("""
+                { "session_id": "abc123" }
+                """, for: request)
+            case "/api/sessions/abc123/messages":
+                return apiTestJSONResponse("""
+                {
+                  "session_id": "abc123",
+                  "messages": [
+                    {
+                      "role": "user",
+                      "content": "Normal attachments",
+                      "_ts": 1770000000,
+                      "attachments": [
+                        {"name": "report.pdf", "path": "/uploads/report.pdf", "mime": "application/pdf", "size": 1024},
+                        {"filename": "image.jpg", "path": "/uploads/image.jpg", "mime": "image/jpeg", "size": 2048, "is_image": true}
+                      ]
+                    },
+                    {
+                      "role": "user",
+                      "content": "Legacy bare string",
+                      "_ts": 1770000001,
+                      "attachments": ["legacy_file.txt"]
+                    },
+                    {
+                      "role": "user",
+                      "content": "Mixed quality",
+                      "_ts": 1770000002,
+                      "attachments": [
+                        {"name": "good.csv", "path": "/uploads/good.csv", "mime": "text/csv", "size": 42},
+                        12345,
+                        {"path": "/uploads/minimal.txt", "mime": "text/plain"}
+                      ]
+                    },
+                    {
+                      "role": "user",
+                      "content": "Null attachments",
+                      "_ts": 1770000003,
+                      "attachments": null
+                    },
+                    {
+                      "role": "user",
+                      "content": "No attachments key",
+                      "_ts": 1770000004
+                    }
+                  ],
+                  "pagination": {"limit": 50, "returned": 5}
+                }
+                """, for: request)
+            default:
+                throw URLError(.badURL)
             }
-            """, for: request)
         }
 
         let response = try await client.session(id: "abc123")
         let messages = try XCTUnwrap(response.session?.messages)
         XCTAssertEqual(messages.count, 5)
+        XCTAssertEqual(requestedPaths, ["/api/sessions/abc123", "/api/sessions/abc123/messages"])
 
         // Message 1: normal + filename alias
         let msg1 = messages[0]
@@ -280,29 +384,39 @@ final class APIClientSessionDetailTests: APIClientTestCase {
     }
 
     func testSessionInfersAttachmentsFromAttachedFilesMarkerWhenServerOmitsMetadata() async throws {
+        var requestedPaths: [String] = []
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/session")
-
-            return apiTestJSONResponse("""
-            {
-              "session": {
-                "session_id": "abc123",
-                "messages": [
-                  {
-                    "role": "user",
-                    "content": "Analyze these\\n\\n[Attached files: image_1778030812_E9EE.jpg, /Users/hermes/projects/workspace/17mb.csv]",
-                    "_ts": 1770000000
-                  }
-                ]
-              }
+            let path = request.url?.path ?? ""
+            requestedPaths.append(path)
+            switch path {
+            case "/api/sessions/abc123":
+                return apiTestJSONResponse("""
+                { "session_id": "abc123" }
+                """, for: request)
+            case "/api/sessions/abc123/messages":
+                return apiTestJSONResponse("""
+                {
+                  "session_id": "abc123",
+                  "messages": [
+                    {
+                      "role": "user",
+                      "content": "Analyze these\\n\\n[Attached files: image_1778030812_E9EE.jpg, /Users/hermes/projects/workspace/17mb.csv]",
+                      "_ts": 1770000000
+                    }
+                  ],
+                  "pagination": {"limit": 50, "returned": 1}
+                }
+                """, for: request)
+            default:
+                throw URLError(.badURL)
             }
-            """, for: request)
         }
 
         let response = try await client.session(id: "abc123")
         let message = try XCTUnwrap(response.session?.messages?.first)
         let attachments = try XCTUnwrap(message.attachments)
 
+        XCTAssertEqual(requestedPaths, ["/api/sessions/abc123", "/api/sessions/abc123/messages"])
         XCTAssertEqual(attachments.count, 2)
         XCTAssertEqual(attachments[0].name, "image_1778030812_E9EE.jpg")
         XCTAssertEqual(attachments[0].path, "/Users/hermes/projects/workspace/image_1778030812_E9EE.jpg")
@@ -313,33 +427,43 @@ final class APIClientSessionDetailTests: APIClientTestCase {
     }
 
     func testSessionEnrichesLegacyAttachmentNamesFromAttachedFilesMarkerPaths() async throws {
+        var requestedPaths: [String] = []
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/session")
-
-            return apiTestJSONResponse("""
-            {
-              "session": {
-                "session_id": "abc123",
-                "messages": [
-                  {
-                    "role": "user",
-                    "content": "Review these\\n\\n[Attached files: /Users/hermes/projects/workspace/image_1778032969_13BE.jpg, /Users/hermes/projects/workspace/hermes-agent-slideshow.html]",
-                    "_ts": 1770000000,
-                    "attachments": [
-                      "image_1778032969_13BE.jpg",
-                      "hermes-agent-slideshow.html"
-                    ]
-                  }
-                ]
-              }
+            let path = request.url?.path ?? ""
+            requestedPaths.append(path)
+            switch path {
+            case "/api/sessions/abc123":
+                return apiTestJSONResponse("""
+                { "session_id": "abc123" }
+                """, for: request)
+            case "/api/sessions/abc123/messages":
+                return apiTestJSONResponse("""
+                {
+                  "session_id": "abc123",
+                  "messages": [
+                    {
+                      "role": "user",
+                      "content": "Review these\\n\\n[Attached files: /Users/hermes/projects/workspace/image_1778032969_13BE.jpg, /Users/hermes/projects/workspace/hermes-agent-slideshow.html]",
+                      "_ts": 1770000000,
+                      "attachments": [
+                        "image_1778032969_13BE.jpg",
+                        "hermes-agent-slideshow.html"
+                      ]
+                    }
+                  ],
+                  "pagination": {"limit": 50, "returned": 1}
+                }
+                """, for: request)
+            default:
+                throw URLError(.badURL)
             }
-            """, for: request)
         }
 
         let response = try await client.session(id: "abc123")
         let message = try XCTUnwrap(response.session?.messages?.first)
         let attachments = try XCTUnwrap(message.attachments)
 
+        XCTAssertEqual(requestedPaths, ["/api/sessions/abc123", "/api/sessions/abc123/messages"])
         XCTAssertEqual(attachments.count, 2)
         XCTAssertEqual(attachments[0].name, "image_1778032969_13BE.jpg")
         XCTAssertEqual(attachments[0].path, "/Users/hermes/projects/workspace/image_1778032969_13BE.jpg")
@@ -350,67 +474,70 @@ final class APIClientSessionDetailTests: APIClientTestCase {
     }
 
     func testSessionDecodesWebUICreatedSessionWithUnexpectedOptionalFieldTypes() async throws {
+        var requestedPaths: [String] = []
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/session")
-
-            return apiTestJSONResponse("""
-            {
-              "session": {
-                "session_id": 12345,
-                "title": 987,
-                "message_count": "2",
-                "pinned": "false",
-                "estimated_cost": "0.12",
-                "pending_attachments": {"unexpected": true},
-                "messages": [
-                  {
-                    "role": "user",
-                    "content": [
-                      {"type": "text", "text": "Hello from rich content"}
-                    ],
-                    "_ts": "1770000000.5",
-                    "message_id": 42,
-                    "attachments": [
-                      {"filename": "image.png", "path": "/uploads/image.png", "size": "2048", "is_image": "true"},
-                      12345
-                    ]
-                  },
-                  {
-                    "role": "assistant",
-                    "content": "Loaded",
-                    "timestamp": 1770000001,
-                    "tool_calls": {"unexpected": "shape"},
-                    "reasoning": {"text": "not the persisted string"}
-                  }
-                ],
-                "tool_calls": [
-                  {
-                    "name": "read_file",
-                    "snippet": 123,
-                    "tid": 456,
-                    "assistant_msg_idx": "4",
-                    "args": ["unexpected"]
-                  },
-                  "malformed"
-                ],
-                "_messages_offset": "4",
-                "_messages_truncated": "true"
-              }
+            let path = request.url?.path ?? ""
+            requestedPaths.append(path)
+            switch path {
+            case "/api/sessions/webui-created":
+                return apiTestJSONResponse("""
+                {
+                  "session_id": 12345,
+                  "title": 987,
+                  "message_count": "2",
+                  "pinned": "false",
+                  "estimated_cost_usd": "0.12",
+                  "future_field": {"unexpected": true}
+                }
+                """, for: request)
+            case "/api/sessions/webui-created/messages":
+                return apiTestJSONResponse("""
+                {
+                  "session_id": "webui-created",
+                  "messages": [
+                    {
+                      "role": "user",
+                      "content": [
+                        {"type": "text", "text": "Hello from rich content"}
+                      ],
+                      "_ts": "1770000000.5",
+                      "message_id": 42,
+                      "attachments": [
+                        {"filename": "image.png", "path": "/uploads/image.png", "size": "2048", "is_image": "true"},
+                        12345
+                      ]
+                    },
+                    {
+                      "role": "assistant",
+                      "content": "Loaded",
+                      "timestamp": 1770000001,
+                      "tool_calls": {"unexpected": "shape"},
+                      "reasoning": {"text": "not the persisted string"}
+                    }
+                  ],
+                  "pagination": {"limit": 50, "returned": 2}
+                }
+                """, for: request)
+            default:
+                throw URLError(.badURL)
             }
-            """, for: request)
         }
 
         let response = try await client.session(id: "webui-created")
         let session = try XCTUnwrap(response.session)
 
+        XCTAssertEqual(requestedPaths, ["/api/sessions/webui-created", "/api/sessions/webui-created/messages"])
+        // Row fields decode lossily across unexpected types.
         XCTAssertEqual(session.sessionId, "12345")
         XCTAssertEqual(session.title, "987")
         XCTAssertEqual(session.messageCount, 2)
         XCTAssertEqual(session.pinned, false)
         XCTAssertEqual(session.estimatedCost ?? -1, 0.12, accuracy: 0.0001)
+        // pending_attachments is a WebUI field with no native equivalent.
         XCTAssertNil(session.pendingAttachments)
-        XCTAssertEqual(session.messagesOffset, 4)
-        XCTAssertEqual(session.messagesTruncated, true)
+        // The short page is not truncated (explicit $false, not nil) and carries no offset.
+        XCTAssertNil(session.messagesOffset)
+        XCTAssertEqual(session.messagesTruncated, false)
 
         let messages = try XCTUnwrap(session.messages)
         XCTAssertEqual(messages.count, 2)
@@ -424,143 +551,84 @@ final class APIClientSessionDetailTests: APIClientTestCase {
         XCTAssertEqual(messages[0].attachments?.first?.isImage, true)
 
         XCTAssertEqual(messages[1].content, "Loaded")
+        // tool_calls/reasoning in unexpected non-array/non-string shapes decode to nil.
         XCTAssertNil(messages[1].toolCalls)
         XCTAssertNil(messages[1].reasoning)
 
-        let toolCall = try XCTUnwrap(session.toolCalls?.first)
-        XCTAssertEqual(session.toolCalls?.count, 1)
-        XCTAssertEqual(toolCall.name, "read_file")
-        XCTAssertEqual(toolCall.snippet, "123")
-        XCTAssertEqual(toolCall.tid, "456")
-        XCTAssertEqual(toolCall.assistantMsgIdx, 4)
-        XCTAssertNil(toolCall.args)
+        // The native surface has no session-level tool_calls field.
+        XCTAssertNil(session.toolCalls)
     }
 
     func testSessionToleratesNumericFieldsOutsideIntRange() async throws {
         // Values beyond Int range reach the lossy int decoder's Double branch,
         // which used to trap instead of decoding to nil (#62).
+        var requestedPaths: [String] = []
         let client = makeClient { request in
-            apiTestJSONResponse("""
-            {
-              "session": {
-                "session_id": "huge-numbers",
-                "message_count": 1e300,
-                "input_tokens": -1e300,
-                "output_tokens": "1e300",
-                "context_length": 9223372036854775808,
-                "messages": [
-                  {"role": "assistant", "content": "Still standing"}
-                ]
-              }
+            let path = request.url?.path ?? ""
+            requestedPaths.append(path)
+            switch path {
+            case "/api/sessions/huge-numbers":
+                return apiTestJSONResponse("""
+                {
+                  "session_id": "huge-numbers",
+                  "message_count": 1e300,
+                  "input_tokens": -1e300,
+                  "output_tokens": "1e300"
+                }
+                """, for: request)
+            case "/api/sessions/huge-numbers/messages":
+                return apiTestJSONResponse("""
+                {
+                  "session_id": "huge-numbers",
+                  "messages": [
+                    {"role": "assistant", "content": "Still standing"}
+                  ],
+                  "pagination": {"limit": 50, "returned": 1}
+                }
+                """, for: request)
+            default:
+                throw URLError(.badURL)
             }
-            """, for: request)
         }
 
         let response = try await client.session(id: "huge-numbers")
         let session = try XCTUnwrap(response.session)
 
+        XCTAssertEqual(requestedPaths, ["/api/sessions/huge-numbers", "/api/sessions/huge-numbers/messages"])
         XCTAssertNil(session.messageCount)
         XCTAssertNil(session.inputTokens)
         XCTAssertNil(session.outputTokens)
+        // context_length has no native row equivalent and maps to nil.
         XCTAssertNil(session.contextLength)
         XCTAssertEqual(session.messages?.first?.content, "Still standing")
     }
 
-    func testSessionDecodesCompressionAnchorMetadata() async throws {
-        let client = makeClient { request in
-            apiTestJSONResponse("""
-            {
-              "session": {
-                "session_id": "abc123",
-                "compression_anchor_visible_idx": 7,
-                "compression_anchor_message_key": {
-                  "role": "user",
-                  "ts": 1770000000.5,
-                  "text": "What does the resolver do?",
-                  "attachments": 1
-                },
-                "compression_anchor_summary": "Summary of the compacted conversation."
-              }
-            }
-            """, for: request)
-        }
-
-        let response = try await client.session(id: "abc123")
-        let session = try XCTUnwrap(response.session)
-
-        XCTAssertEqual(session.compressionAnchorVisibleIdx, 7)
-        XCTAssertEqual(session.compressionAnchorMessageKey?.role, "user")
-        XCTAssertEqual(session.compressionAnchorMessageKey?.ts, 1_770_000_000.5)
-        XCTAssertEqual(session.compressionAnchorMessageKey?.text, "What does the resolver do?")
-        XCTAssertEqual(session.compressionAnchorMessageKey?.attachments, 1)
-        XCTAssertEqual(session.compressionAnchorSummary, "Summary of the compacted conversation.")
-    }
-
     func testSessionWithoutCompressionAnchorMetadataDecodesNil() async throws {
+        var requestedPaths: [String] = []
         let client = makeClient { request in
-            apiTestJSONResponse("""
-            { "session": { "session_id": "abc123" } }
-            """, for: request)
+            let path = request.url?.path ?? ""
+            requestedPaths.append(path)
+            switch path {
+            case "/api/sessions/abc123":
+                return apiTestJSONResponse("""
+                { "session_id": "abc123" }
+                """, for: request)
+            case "/api/sessions/abc123/messages":
+                return apiTestJSONResponse("""
+                { "session_id": "abc123", "messages": [], "pagination": {"limit": 50, "returned": 0} }
+                """, for: request)
+            default:
+                throw URLError(.badURL)
+            }
         }
 
         let response = try await client.session(id: "abc123")
         let session = try XCTUnwrap(response.session)
 
+        XCTAssertEqual(requestedPaths, ["/api/sessions/abc123", "/api/sessions/abc123/messages"])
+        // Native rows carry no compression-anchor metadata, so it stays nil.
         XCTAssertNil(session.compressionAnchorVisibleIdx)
         XCTAssertNil(session.compressionAnchorMessageKey)
-        XCTAssertNil(session.compressionAnchorSummary)
-    }
-
-    func testSessionToleratesMalformedCompressionAnchorMetadata() async throws {
-        let client = makeClient { request in
-            apiTestJSONResponse("""
-            {
-              "session": {
-                "session_id": "abc123",
-                "compression_anchor_visible_idx": "not-a-number",
-                "compression_anchor_message_key": "unexpected-string",
-                "compression_anchor_summary": ["unexpected", "array"]
-              }
-            }
-            """, for: request)
-        }
-
-        let response = try await client.session(id: "abc123")
-        let session = try XCTUnwrap(response.session)
-
-        XCTAssertEqual(session.sessionId, "abc123")
-        XCTAssertNil(session.compressionAnchorVisibleIdx)
-        XCTAssertNil(session.compressionAnchorMessageKey)
-        XCTAssertNil(session.compressionAnchorSummary)
-    }
-
-    func testSessionDecodesPartialAndLossyCompressionAnchorKeyFields() async throws {
-        let client = makeClient { request in
-            apiTestJSONResponse("""
-            {
-              "session": {
-                "session_id": "abc123",
-                "compression_anchor_visible_idx": "12",
-                "compression_anchor_message_key": {
-                  "role": "assistant",
-                  "ts": null,
-                  "text": "Partial key",
-                  "attachments": "3",
-                  "unexpected_extra": {"nested": true}
-                }
-              }
-            }
-            """, for: request)
-        }
-
-        let response = try await client.session(id: "abc123")
-        let session = try XCTUnwrap(response.session)
-
-        XCTAssertEqual(session.compressionAnchorVisibleIdx, 12)
-        XCTAssertEqual(session.compressionAnchorMessageKey?.role, "assistant")
-        XCTAssertNil(session.compressionAnchorMessageKey?.ts)
-        XCTAssertEqual(session.compressionAnchorMessageKey?.text, "Partial key")
-        XCTAssertEqual(session.compressionAnchorMessageKey?.attachments, 3)
         XCTAssertNil(session.compressionAnchorSummary)
     }
 

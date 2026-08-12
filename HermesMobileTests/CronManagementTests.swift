@@ -204,7 +204,8 @@ final class CronManagementViewModelTests: XCTestCase {
     @MainActor
     func testTasksViewModelCreateInsertsReturnedJob() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/crons/create")
+            XCTAssertEqual(request.url?.path, "/api/cron/jobs")
+            XCTAssertEqual(request.httpMethod, "POST")
 
             return apiTestJSONResponse("""
             {
@@ -239,13 +240,11 @@ final class CronManagementViewModelTests: XCTestCase {
     func testTasksViewModelLoadPopulatesDeliveryOptions() async throws {
         let client = makeClient { request in
             switch request.url?.path {
-            case "/api/crons":
+            case "/api/cron/jobs":
                 return apiTestJSONResponse(#"{"jobs": []}"#, for: request)
-            case "/api/crons/status":
-                return apiTestJSONResponse(#"{"running": {}}"#, for: request)
-            case "/api/crons/delivery-options":
+            case "/api/cron/delivery-targets":
                 return apiTestJSONResponse(
-                    #"{"platforms": [{"value": "local", "label": "Local (save output only)"}]}"#,
+                    #"{"targets": [{"id": "local", "name": "Local (save output only)"}]}"#,
                     for: request
                 )
             default:
@@ -266,11 +265,9 @@ final class CronManagementViewModelTests: XCTestCase {
     func testTasksViewModelLoadToleratesDeliveryOptionsFailure() async throws {
         let client = makeClient { request in
             switch request.url?.path {
-            case "/api/crons":
+            case "/api/cron/jobs":
                 return apiTestJSONResponse(#"{"jobs": [{"id": "job123", "name": "Digest"}]}"#, for: request)
-            case "/api/crons/status":
-                return apiTestJSONResponse(#"{"running": {}}"#, for: request)
-            case "/api/crons/delivery-options":
+            case "/api/cron/delivery-targets":
                 let response = HTTPURLResponse(
                     url: request.url!,
                     statusCode: 404,
@@ -295,7 +292,8 @@ final class CronManagementViewModelTests: XCTestCase {
     @MainActor
     func testTaskDetailViewModelPauseUpdatesJobAndPublishesMutation() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/crons/pause")
+            XCTAssertEqual(request.url?.path, "/api/cron/jobs/job123/pause")
+            XCTAssertEqual(request.httpMethod, "POST")
 
             return apiTestJSONResponse("""
             {
@@ -342,7 +340,8 @@ final class CronManagementViewModelTests: XCTestCase {
     @MainActor
     func testTaskDetailViewModelDeletePublishesDeleteMutation() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/crons/delete")
+            XCTAssertEqual(request.url?.path, "/api/cron/jobs/job123")
+            XCTAssertEqual(request.httpMethod, "DELETE")
 
             return apiTestJSONResponse("""
             {
