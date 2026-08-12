@@ -1,9 +1,9 @@
 import XCTest
 @testable import HermesMobile
 
-/// Clarification prompt tests. The SSE-era `/api/clarify/respond` REST path
-/// was replaced by the gateway `clarify.respond` RPC, and clarify payloads
-/// arrive as `clarify` gateway stream events routed through
+/// Clarification prompt tests. The legacy clarify REST endpoint was replaced by
+/// the gateway `clarify.respond` RPC, and clarify payloads arrive as `clarify`
+/// gateway stream events routed through
 /// `ChatStreamCoordinator` → `applyClarificationUpdate`. The pure model-decode
 /// and marker-parsing tests are kept as-is; the stream tests drive
 /// `.clarification` `GatewayEvent`s through the shared
