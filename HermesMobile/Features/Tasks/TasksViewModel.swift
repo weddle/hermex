@@ -33,15 +33,17 @@ final class TasksViewModel {
         defer { isLoading = false }
 
         do {
+            // The native dashboard exposes cron jobs per profile and RUN state only
+            // through per-job runs; there is no aggregate "running jobs" endpoint, so
+            // runningJobs stays empty (each job's detail can still be refreshed).
             async let jobsResponse = client.crons()
-            async let statusResponse = client.cronStatus()
             // Optional endpoint: failure must not break the task list, and a
             // nil result keeps the editor's free-text deliver fallback.
             async let deliveryOptionsResponse = try? client.cronDeliveryOptions()
 
-            let (jobsResult, statusResult) = try await (jobsResponse, statusResponse)
-            runningJobs = statusResult.runningJobs ?? [:]
+            let jobsResult = try await jobsResponse
             jobs = (jobsResult.jobs ?? []).sorted(by: sortJobs)
+            runningJobs = [:]
             deliveryOptions = await deliveryOptionsResponse?.platforms
         } catch {
             lastError = error

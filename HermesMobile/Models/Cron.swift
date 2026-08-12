@@ -2,12 +2,65 @@ import Foundation
 
 struct CronJobsResponse: Decodable, Equatable {
     let jobs: [CronJob]?
+
+    init(jobs: [CronJob]?) {
+        self.jobs = jobs
+    }
+
+    init(from decoder: Decoder) throws {
+        // The native endpoint returns a bare array of job records; the legacy WebUI
+        // endpoint used `{jobs: [...]}`. Both decode into `jobs`.
+        if let container = try? decoder.singleValueContainer() {
+            if let array = try? container.decode([CronJob].self) {
+                jobs = array
+                return
+            }
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        jobs = try container.decodeIfPresent([CronJob].self, forKey: .jobs)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case jobs
+    }
 }
 
 struct CronMutationResponse: Decodable, Equatable {
     let ok: Bool?
     let job: CronJob?
     let error: String?
+
+    init(ok: Bool?, job: CronJob?, error: String?) {
+        self.ok = ok
+        self.job = job
+        self.error = error
+    }
+
+    init(from decoder: Decoder) throws {
+        // Native create/update/pause/resume/trigger return the job record directly
+        // (cron/scheduler jobs.py shapes); the legacy WebUI endpoints returned
+        // {ok, job, error}. Tolerate both.
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let wrapperOk = try container.decodeIfPresent(Bool.self, forKey: .ok)
+        let wrapperJob = (try? container.decodeIfPresent(CronJob.self, forKey: .job)) ?? nil
+        let wrapperError = try container.decodeIfPresent(String.self, forKey: .error)
+
+        // A bare job record: none of the wrapper keys present → treat the payload as job.
+        var resolvedJob = wrapperJob
+        if wrapperOk == nil, wrapperJob == nil, wrapperError == nil {
+            resolvedJob = try CronJob(from: decoder)
+        }
+
+        ok = wrapperOk
+        job = resolvedJob
+        error = wrapperError
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case ok
+        case job
+        case error
+    }
 }
 
 struct CronStatusResponse: Decodable, Equatable {
@@ -213,48 +266,133 @@ struct CronOutputResponse: Decodable, Equatable {
     enum CodingKeys: String, CodingKey {
         case jobId
         case outputs
+        case runs
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         jobId = try container.decodeIfPresent(String.self, forKey: .jobId)
-        outputs = (try? container.decodeIfPresent([CronOutputItem].self, forKey: .outputs)) ?? nil
+
+        if let outputs = try? container.decodeIfPresent([CronOutputItem].self, forKey: .outputs) {
+            self.outputs = outputs
+            return
+        }
+
+        // Native GET /api/cron/jobs/{id}/runs → {runs: [session rows]}. Map each run
+        // session into an output row titled by its session id/title.
+        if let runs = try? container.decode([CronRunSession].self, forKey: .runs) {
+            self.outputs = runs.map { run in
+                CronOutputItem(
+                    filename: run.title ?? run.sessionId ?? String(localized: "Run"),
+                    content: nil,
+                    runID: run.sessionId,
+                    runStartedAt: run.startedAt ?? run.createdAt
+                )
+            }
+            return
+        }
+
+        self.outputs = nil
+    }
+
+    init(runs: [CronRunSession]?) {
+        jobId = nil
+        outputs = (runs ?? []).map { run in
+            CronOutputItem(
+                filename: run.title ?? run.sessionId ?? String(localized: "Run"),
+                content: nil,
+                runID: run.sessionId,
+                runStartedAt: run.startedAt ?? run.createdAt
+            )
+        }
     }
 }
 
+/// A single run session returned by the native cron runs endpoint
+/// (GET /api/cron/jobs/{id}/runs → {runs: [...]}).
+struct CronRunSession: Decodable, Equatable {
+    let sessionId: String?
+    let title: String?
+    let createdAt: Double?
+    let startedAt: Double?
+    let endedAt: Double?
+    let model: String?
+    let profile: String?
+}
+
 struct CronOutputItem: Decodable, Equatable, Identifiable {
-    var id: String { filename ?? UUID().uuidString }
+    var id: String { filename ?? runID ?? UUID().uuidString }
 
     let filename: String?
     let content: String?
+    /// Run-session identifier (native runs endpoint); nil for WebUI output files.
+    let runID: String?
+    /// Run start timestamp (native runs endpoint); nil for WebUI output files.
+    let runStartedAt: Double?
 
     enum CodingKeys: String, CodingKey {
         case filename
         case content
+        case runID
+        case runStartedAt
+    }
+
+    init(filename: String?, content: String?, runID: String? = nil, runStartedAt: Double? = nil) {
+        self.filename = filename
+        self.content = content
+        self.runID = runID
+        self.runStartedAt = runStartedAt
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         filename = try container.decodeIfPresent(String.self, forKey: .filename)
         content = try container.decodeIfPresent(String.self, forKey: .content)
+        runID = try container.decodeIfPresent(String.self, forKey: .runID)
+        runStartedAt = try container.decodeFlexibleDoubleIfPresent(forKey: .runStartedAt)
     }
 }
 
 struct CronDeliveryOptionsResponse: Decodable, Equatable {
     let platforms: [CronDeliveryOption]?
 
-    enum CodingKeys: String, CodingKey {
-        case platforms
-    }
-
     init(platforms: [CronDeliveryOption]?) {
         self.platforms = platforms
     }
 
     init(from decoder: Decoder) throws {
+        // Native GET /api/cron/delivery-targets → {targets: [{id, name, ...}]};
+        // the legacy WebUI endpoint used {platforms: [{value, label}]}. Both map.
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        platforms = (try? container.decodeIfPresent([CronDeliveryOption].self, forKey: .platforms)) ?? nil
+
+        if let raw = try? container.decodeIfPresent([CronDeliveryOption].self, forKey: .platforms),
+           raw != nil {
+            platforms = raw
+            return
+        }
+
+        if let targets = try? container.decodeIfPresent([CronDeliveryTarget].self, forKey: .targets) {
+            platforms = (targets ?? []).map { target in
+                CronDeliveryOption(value: target.id, label: target.name)
+            }
+            return
+        }
+
+        platforms = nil
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case platforms
+        case targets
+    }
+}
+
+/// A delivery target returned by the native cron delivery-targets endpoint.
+struct CronDeliveryTarget: Decodable, Equatable {
+    let id: String?
+    let name: String?
+    let homeTargetSet: Bool?
+    let homeEnvVar: String?
 }
 
 struct CronDeliveryOption: Decodable, Equatable, Identifiable {

@@ -55,13 +55,12 @@ enum Endpoint {
     case settings
     case crons
     case cronCreate
-    case cronUpdate
-    case cronDelete
-    case cronRun
-    case cronPause
-    case cronResume
-    case cronStatus(jobID: String?)
-    case cronOutput(jobID: String, limit: Int?)
+    case cronUpdate(jobID: String)
+    case cronDelete(jobID: String)
+    case cronRun(jobID: String)
+    case cronPause(jobID: String)
+    case cronResume(jobID: String)
+    case cronRuns(jobID: String, limit: Int?)
     case cronDeliveryOptions
     case memory
     case memoryWrite
@@ -175,25 +174,23 @@ enum Endpoint {
         case .settings:
             return "/api/settings"
         case .crons:
-            return "/api/crons"
+            return "/api/cron/jobs"
         case .cronCreate:
-            return "/api/crons/create"
-        case .cronUpdate:
-            return "/api/crons/update"
-        case .cronDelete:
-            return "/api/crons/delete"
-        case .cronRun:
-            return "/api/crons/run"
-        case .cronPause:
-            return "/api/crons/pause"
-        case .cronResume:
-            return "/api/crons/resume"
-        case .cronStatus:
-            return "/api/crons/status"
-        case .cronOutput:
-            return "/api/crons/output"
+            return "/api/cron/jobs"
+        case let .cronUpdate(jobID):
+            return "/api/cron/jobs/\(jobID)"
+        case let .cronDelete(jobID):
+            return "/api/cron/jobs/\(jobID)"
+        case let .cronRun(jobID):
+            return "/api/cron/jobs/\(jobID)/trigger"
+        case let .cronPause(jobID):
+            return "/api/cron/jobs/\(jobID)/pause"
+        case let .cronResume(jobID):
+            return "/api/cron/jobs/\(jobID)/resume"
+        case let .cronRuns(jobID, _):
+            return "/api/cron/jobs/\(jobID)/runs"
         case .cronDeliveryOptions:
-            return "/api/crons/delivery-options"
+            return "/api/cron/delivery-targets"
         case .memory:
             return "/api/memory"
         case .memoryWrite:
@@ -282,11 +279,8 @@ enum Endpoint {
                 URLQueryItem(name: "scope", value: "uncommitted"),
                 URLQueryItem(name: "staged", value: kind == "staged" ? "true" : "false")
             ]
-        case let .cronStatus(jobID):
-            guard let jobID else { return [] }
-            return [URLQueryItem(name: "job_id", value: jobID)]
-        case let .cronOutput(jobID, limit):
-            var items = [URLQueryItem(name: "job_id", value: jobID)]
+        case let .cronRuns(jobID, limit):
+            var items: [URLQueryItem] = []
             if let limit {
                 items.append(URLQueryItem(name: "limit", value: "\(limit)"))
             }
