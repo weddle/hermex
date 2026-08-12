@@ -191,15 +191,6 @@ struct MessageComposerView: View {
             return false
         }
 
-        if parsed.command?.subArgs == .goalActions,
-           parsed.isSubArgMode,
-           !parsed.argQuery.isEmpty,
-           !SlashCommandCatalog.goalActions.contains(where: {
-               $0.hasPrefix(parsed.argQuery.lowercased())
-           }) {
-            return false
-        }
-
         return true
     }
 
@@ -232,7 +223,7 @@ struct MessageComposerView: View {
             return "personalities"
         case .skills:
             return "skills"
-        case .models, .reasoningLevels, .goalActions, .none:
+        case .models, .reasoningLevels, .none:
             return ""
         }
     }
@@ -581,7 +572,7 @@ struct MessageComposerView: View {
             await onLoadPersonalitySuggestions()
         case .skills:
             await onLoadSkillSuggestions()
-        case .models, .reasoningLevels, .goalActions, .none:
+        case .models, .reasoningLevels, .none:
             break
         }
     }

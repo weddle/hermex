@@ -1,9 +1,9 @@
 import Foundation
 
 extension APIClient {
-    /// Parameterless overload kept so `InsightsDataClient` (and any other
-    /// protocol witness) still sees the exact `sessions()` signature — a method
-    /// with defaulted parameters cannot satisfy that requirement.
+    /// Parameterless overload kept so callers that need the exact `sessions()`
+    /// signature — a method with defaulted parameters cannot satisfy that
+    /// requirement — can invoke the defaulted variant.
     func sessions() async throws -> SessionsResponse {
         try await sessions(includeArchived: false, archivedLimit: nil)
     }

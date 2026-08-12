@@ -107,152 +107,6 @@ final class NavigationAppearanceObserverViewController: UIViewController {
     }
 }
 
-private struct ListenPlaybackBar: View {
-    let phase: ListenPlaybackPhase
-    let displayTime: TimeInterval
-    let duration: TimeInterval
-    let speed: ListenPlaybackSpeed
-    let onTogglePlayPause: () -> Void
-    let onStop: () -> Void
-    let onScrub: (TimeInterval) -> Void
-    let onScrubbingChanged: (Bool) -> Void
-    let onSpeedChange: (ListenPlaybackSpeed) -> Void
-
-    private var isReady: Bool {
-        phase == .playing || phase == .paused
-    }
-
-    private var isPlaying: Bool {
-        phase == .playing
-    }
-
-    private var boundedDisplayTime: TimeInterval {
-        min(max(0, displayTime), max(duration, 0))
-    }
-
-    private var sliderUpperBound: TimeInterval {
-        max(duration, 0.01)
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                playPauseButton
-
-                VStack(alignment: .leading, spacing: 4) {
-                    scrubber
-                    timeRow
-                }
-                .frame(maxWidth: .infinity)
-
-                speedMenu
-                stopButton
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
-
-            Divider()
-        }
-        .background(.regularMaterial)
-        .accessibilityElement(children: .contain)
-    }
-
-    @ViewBuilder
-    private var playPauseButton: some View {
-        if phase == .loading {
-            ZStack {
-                Circle()
-                    .fill(Color.accentColor.opacity(0.14))
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(Color.accentColor)
-            }
-            .frame(width: 34, height: 34)
-            .accessibilityLabel(String(localized: "Preparing audio"))
-        } else {
-            Button(action: onTogglePlayPause) {
-                ZStack {
-                    Circle()
-                        .fill(Color.accentColor)
-                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(.white)
-                }
-                .frame(width: 34, height: 34)
-            }
-            .buttonStyle(.chatTactile(.icon))
-            .disabled(!isReady)
-            .accessibilityLabel(isPlaying ? String(localized: "Pause audio") : String(localized: "Play audio"))
-        }
-    }
-
-    private var scrubber: some View {
-        Slider(
-            value: Binding(
-                get: { boundedDisplayTime },
-                set: { onScrub($0) }
-            ),
-            in: 0...sliderUpperBound,
-            onEditingChanged: onScrubbingChanged
-        )
-        .tint(Color.accentColor)
-        .disabled(!isReady || duration <= 0)
-        .accessibilityLabel(String(localized: "Playback position"))
-    }
-
-    private var timeRow: some View {
-        HStack(spacing: 8) {
-            Text(AudioDurationFormatter.string(from: boundedDisplayTime))
-            Text("/")
-            Text(AudioDurationFormatter.string(from: duration))
-            Spacer(minLength: 0)
-        }
-        .font(AppFont.caption2().monospacedDigit())
-        .foregroundStyle(.secondary)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(String(localized: "\(AudioDurationFormatter.string(from: boundedDisplayTime)) of \(AudioDurationFormatter.string(from: duration))"))
-    }
-
-    private var speedMenu: some View {
-        Menu {
-            ForEach(ListenPlaybackSpeed.allCases) { option in
-                Button {
-                    onSpeedChange(option)
-                } label: {
-                    HStack {
-                        Text(option.title)
-                        if option == speed {
-                            Image(systemName: "checkmark")
-                        }
-                    }
-                }
-            }
-        } label: {
-            Text(speed.title)
-                .font(AppFont.caption().weight(.semibold))
-                .monospacedDigit()
-                .frame(minWidth: 36, minHeight: 30)
-                .padding(.horizontal, 6)
-                .background(Color(.secondarySystemBackground), in: Capsule())
-        }
-        .disabled(!isReady)
-        .accessibilityLabel(String(localized: "Playback speed"))
-        .accessibilityValue(speed.title)
-    }
-
-    private var stopButton: some View {
-        Button(action: onStop) {
-            Image(systemName: "xmark")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 30, height: 30)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.chatTactile(.icon))
-        .accessibilityLabel(String(localized: "Stop audio"))
-    }
-}
-
 struct ChatView: View {
     private let bottomAnchorID = "chat-bottom-anchor"
     private let transcriptMessageSpacing: CGFloat = 10
@@ -304,8 +158,6 @@ struct ChatView: View {
     @State private var transcriptMediaPreviewItem: TranscriptMediaPreviewItem?
     @State private var pendingProfileSelection: ProfileSummary?
     @State private var showProfileNewSessionConfirmation = false
-    @State private var goalDraft = ""
-    @State private var showsGoalSheet = false
     @State private var activeGitSheet: ActiveGitSheet?
     @State private var turnDiffPresentation: TurnDiffPresentation?
     @State private var viewModel: ChatViewModel
@@ -528,14 +380,11 @@ struct ChatView: View {
                     ChatOfflineCacheBanner()
                 }
 
-                listenPlaybackBar
-
                 messageContent
                     // Scope RTL to the chat transcript only (#259): the offline
                     // banner above stays in the app's default direction.
                     .environment(\.layoutDirection, chatLayoutDirection)
             }
-            .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: viewModel.showsListenPlaybackBar)
 
             BottomComposerMaterialFade(composerHeight: composerHeight)
 
@@ -635,12 +484,6 @@ struct ChatView: View {
 
                 ToolbarItem(placement: .topBarTrailing) {
                     ChatToolbarActionCluster {
-                        if viewModel.hasActivatedGoalCommand {
-                            ChatToolbarActionSlot {
-                                goalControlMenu
-                            }
-                        }
-
                         if showsFilesButton {
                             ChatToolbarActionSlot {
                                 NavigationLink {
@@ -684,15 +527,6 @@ struct ChatView: View {
             .sheet(item: $activeGitSheet, content: gitSheet)
             .sheet(item: $turnDiffPresentation, content: turnDiffSheet)
             .alert(item: $gitAlert, content: gitAlertPresentation)
-            .sheet(isPresented: $showsGoalSheet) {
-                GoalSubmissionSheet(
-                    goalDraft: $goalDraft,
-                    isSubmitting: viewModel.isSubmittingGoal,
-                    onSubmit: { submittedGoal in
-                        Task { await submitGoalDraft(submittedGoal) }
-                    }
-                )
-            }
             .sheet(isPresented: $showEditSheet) {
                 EditMessageSheet(
                     originalText: editContext?.copyText ?? "",
@@ -767,34 +601,6 @@ struct ChatView: View {
             } message: {
                 Text(viewModel.messageActionErrorMessage ?? "")
             }
-    }
-
-    @ViewBuilder
-    private var listenPlaybackBar: some View {
-        if viewModel.showsListenPlaybackBar {
-            ListenPlaybackBar(
-                phase: viewModel.listenPlaybackPhase,
-                displayTime: viewModel.listenPlaybackDisplayTime,
-                duration: viewModel.listenPlaybackDuration,
-                speed: viewModel.listenPlaybackSpeed,
-                onTogglePlayPause: {
-                    viewModel.toggleListenPlaybackPlayPause()
-                },
-                onStop: {
-                    viewModel.stopListening()
-                },
-                onScrub: { time in
-                    viewModel.scrubListenPlayback(to: time)
-                },
-                onScrubbingChanged: { isScrubbing in
-                    viewModel.setListenPlaybackScrubbing(isScrubbing)
-                },
-                onSpeedChange: { speed in
-                    viewModel.setListenPlaybackSpeed(speed)
-                }
-            )
-            .transition(ChatMotion.disclosureTransition(reduceMotion: reduceMotion))
-        }
     }
 
     private var gitWriteAvailability: GitWriteAvailability {
@@ -1357,24 +1163,6 @@ struct ChatView: View {
         await availabilityViewModel.loadIfNeeded()
     }
 
-    private var goalControlMenu: some View {
-        GoalControlsMenu(
-            currentGoal: viewModel.currentGoal,
-            isViewingCachedData: viewModel.isViewingCachedData,
-            isActionDisabled: isGoalActionDisabled,
-            onSetGoal: {
-                showsGoalSheet = true
-            },
-            onSubmitCommand: { command in
-                Task { await submitGoalCommand(command) }
-            }
-        )
-    }
-
-    private var isGoalActionDisabled: Bool {
-        viewModel.isViewingCachedData || viewModel.activeStreamID != nil || viewModel.isSubmittingGoal
-    }
-
     private func loadMessages(appliesInitialFocus: Bool = true) async {
         await viewModel.loadMessages(modelContext: modelContext)
         await viewModel.reconnectStreamIfNeeded(modelContext: modelContext)
@@ -1401,27 +1189,6 @@ struct ChatView: View {
         }
 
         return didLoad
-    }
-
-    private func submitGoalDraft(_ submittedGoal: String) async {
-        await submitGoal(submittedGoal, clearsDraftOnSuccess: true)
-    }
-
-    private func submitGoalCommand(_ command: String) async {
-        await submitGoal(command, clearsDraftOnSuccess: false)
-    }
-
-    private func submitGoal(_ args: String, clearsDraftOnSuccess: Bool) async {
-        prepareTranscriptForExplicitSend()
-
-        let didSubmit = await viewModel.submitGoal(args: args, modelContext: modelContext)
-        if didSubmit, clearsDraftOnSuccess {
-            goalDraft = ""
-        }
-
-        if let lastError = viewModel.lastError {
-            onAPIError(lastError)
-        }
     }
 
     private func sendDraftMessage() async {
@@ -1538,8 +1305,7 @@ struct ChatView: View {
         command?.handler == .serverSide(.compress) ||
             command?.handler == .serverSide(.queue) ||
             command?.handler == .serverSide(.steer) ||
-            command?.handler == .serverSide(.interrupt) ||
-            command?.handler == .serverSide(.background)
+            command?.handler == .serverSide(.interrupt)
     }
 
     private var streamingSendBehaviorCommandName: String {
@@ -1852,7 +1618,6 @@ struct ChatView: View {
                 beginResponseCompletionBackgroundTask()
             }
         case .active:
-            viewModel.refreshListenPlaybackProgressAfterSceneActivation()
             endResponseCompletionBackgroundTask()
             Task {
                 await viewModel.reconnectStreamIfNeeded(modelContext: modelContext)

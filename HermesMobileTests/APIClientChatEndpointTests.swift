@@ -223,31 +223,7 @@ final class APIClientChatEndpointTests: APIClientTestCase {
         XCTAssertFalse(item.inferredIsImage)
         XCTAssertTrue(item.isKnownUnsupportedBinary)
     }
-
-    func testCancelChatBuildsExpectedQuery() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/cancel")
-
-            let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
-            let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
-            XCTAssertEqual(query["stream_id"], "stream-123")
-
-            return apiTestJSONResponse("""
-            {
-              "ok": true,
-              "cancelled": true,
-              "stream_id": "stream-123"
-            }
-            """, for: request)
-        }
-
-        let response = try await client.cancelChat(streamID: "stream-123")
-
-        XCTAssertEqual(response.ok, true)
-        XCTAssertEqual(response.cancelled, true)
-        XCTAssertEqual(response.streamId, "stream-123")
-    }
-
+final class APIClientChatEndpointTests: APIClientTestCase {
     func testChatStreamStatusBuildsExpectedQuery() async throws {
         let client = makeClient { request in
             XCTAssertEqual(request.url?.path, "/api/chat/stream/status")

@@ -237,15 +237,6 @@ final class SessionNavigationStateTests: XCTestCase {
         XCTAssertNil(reevaluatedState.selectedSessionID)
     }
 
-    func testKanbanIsSelectableAsAUtilityDestination() {
-        var state = SessionNavigationState()
-
-        state.select(SessionListUtilityDestination.kanban)
-
-        XCTAssertEqual(state.destination, .utility(.kanban))
-        XCTAssertNil(state.selectedSessionID)
-    }
-
     func testReselectingRootDestinationAdvancesNavigationRevision() {
         var state = SessionNavigationState()
         state.select(SessionListUtilityDestination.skills)

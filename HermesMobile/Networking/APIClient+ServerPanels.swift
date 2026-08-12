@@ -130,38 +130,6 @@ extension APIClient {
             )
         )
     }
-
-    func updatesCheck() async throws -> UpdatesCheckResponse {
-        try await send(endpoint: .updatesCheck, method: "GET")
-    }
-
-    /// Forces a *live* update check: `POST /api/updates/check` with `{ "force": true }`.
-    /// Upstream runs a real `git fetch` for this path (`check_for_updates(force=True)`),
-    /// whereas the plain GET only returns the cached status. Same response shape, so
-    /// `UpdatesCheckResponse` is reused. Used by the manual "Check for updates" button (#308).
-    func updatesCheckForced() async throws -> UpdatesCheckResponse {
-        try await send(
-            endpoint: .updatesCheck,
-            method: "POST",
-            body: UpdatesCheckForceRequest(force: true)
-        )
-    }
-
-    /// Applies a pending repo update. The server pulls `--ff-only` and then
-    /// restarts itself, so the caller must tolerate a brief connection outage
-    /// and re-poll afterwards. Defaults to the `webui` target (issue #180 scope;
-    /// no `agent` target, `/force`, or `/summary`).
-    func applyUpdate(target: String = "webui") async throws -> UpdatesApplyResponse {
-        try await send(
-            endpoint: .updatesApply,
-            method: "POST",
-            body: UpdatesApplyRequest(target: target)
-        )
-    }
-
-    func insights(days: Int) async throws -> InsightsResponse {
-        try await send(endpoint: .insights(days: days), method: "GET")
-    }
 }
 
 private struct DefaultModelRequest: Encodable {
@@ -192,14 +160,6 @@ private struct ProfileCreateRequest: Encodable {
     let modelProvider: String?
     let baseUrl: String?
     let apiKey: String?
-}
-
-private struct UpdatesApplyRequest: Encodable {
-    let target: String
-}
-
-private struct UpdatesCheckForceRequest: Encodable {
-    let force: Bool
 }
 
 private struct ShowCliSessionsUpdateRequest: Encodable {

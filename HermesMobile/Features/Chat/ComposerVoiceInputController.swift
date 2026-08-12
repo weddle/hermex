@@ -362,31 +362,29 @@ final class ComposerVoiceInputController {
             return
         }
 
-        guard let apiClient else {
+        // The native dashboard has no server transcription endpoint. Recognize the
+        // recorded clip on-device — the server-STT path is folded into the local
+        // recognizer so voice input stays fully device-local.
+        guard let speechRecognizer = onDeviceSpeechRecognizerForRecording() else {
             cleanupRecordingFile(recordingURL, transcriptionID: transcriptionID)
             fail(
-                String(localized: "Server speech-to-text is not configured."),
+                String(localized: "On-device speech recognition is not available for the current locale."),
                 logCategory: .speechUnavailable
             )
             return
         }
 
         do {
-            let audioData = try Data(contentsOf: recordingURL)
-            let response = try await apiClient.transcribeAudio(
-                data: audioData,
-                filename: recordingURL.lastPathComponent
-            )
-
+            let transcript = try await recognizeRecordedFile(recordingURL, speechRecognizer: speechRecognizer)
             guard isActiveTranscription(transcriptionID), !Task.isCancelled else {
                 cleanupRecordingFile(recordingURL, transcriptionID: transcriptionID)
                 return
             }
 
-            if let transcript = response.transcript?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !transcript.isEmpty {
-                liveTranscript = transcript
-                if let composedDraft = draftUpdateSession.composedDraft(for: transcript) {
+            let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                liveTranscript = trimmed
+                if let composedDraft = draftUpdateSession.composedDraft(for: trimmed) {
                     updateDraft?(composedDraft)
                 }
                 stopAcceptingDraftUpdates()
@@ -396,81 +394,11 @@ final class ComposerVoiceInputController {
                 return
             }
 
-            let serverMessage = response.error ?? String(localized: "Transcription returned no text.")
-            await fallbackFromServerFailure(
-                recordingURL: recordingURL,
-                transcriptionID: transcriptionID,
-                message: serverMessage
+            cleanupRecordingFile(recordingURL, transcriptionID: transcriptionID)
+            fail(
+                String(localized: "Transcription returned no text."),
+                logCategory: .speechUnavailable
             )
-        } catch {
-            guard isActiveTranscription(transcriptionID), !Task.isCancelled else {
-                cleanupRecordingFile(recordingURL, transcriptionID: transcriptionID)
-                return
-            }
-
-            await fallbackFromServerFailure(
-                recordingURL: recordingURL,
-                transcriptionID: transcriptionID,
-                message: error.localizedDescription
-            )
-        }
-    }
-
-    private func fallbackFromServerFailure(
-        recordingURL: URL,
-        transcriptionID: UUID,
-        message: String
-    ) async {
-        guard ComposerSTTProviderPolicy.fallbackProvider(
-            after: .server,
-            preference: providerPreference,
-            serverConfigured: apiClient != nil,
-            onDeviceSupported: onDeviceSpeechRecognizerForRecording() != nil
-        ) == .onDevice,
-              let speechRecognizer = onDeviceSpeechRecognizerForRecording()
-        else {
-            cleanupRecordingFile(recordingURL, transcriptionID: transcriptionID)
-            fail(message, logCategory: .speechUnavailable)
-            return
-        }
-
-        let speechStatus = await requestSpeechAuthorization()
-        guard isActiveTranscription(transcriptionID), !Task.isCancelled else {
-            cleanupRecordingFile(recordingURL, transcriptionID: transcriptionID)
-            return
-        }
-        guard speechStatus == .authorized else {
-            cleanupRecordingFile(recordingURL, transcriptionID: transcriptionID)
-            fail(Self.speechAuthorizationMessage(for: speechStatus), logCategory: .speechAuthorization)
-            return
-        }
-
-        do {
-            let transcript = try await recognizeRecordedFile(
-                recordingURL,
-                speechRecognizer: speechRecognizer
-            )
-            guard isActiveTranscription(transcriptionID), !Task.isCancelled else {
-                cleanupRecordingFile(recordingURL, transcriptionID: transcriptionID)
-                return
-            }
-
-            liveTranscript = transcript
-            guard !transcript.isEmpty else {
-                cleanupRecordingFile(recordingURL, transcriptionID: transcriptionID)
-                fail(
-                    String(localized: "Transcription returned no text."),
-                    logCategory: .speechUnavailable
-                )
-                return
-            }
-            if let composedDraft = draftUpdateSession.composedDraft(for: transcript) {
-                updateDraft?(composedDraft)
-            }
-            stopAcceptingDraftUpdates()
-            cleanupRecordingFile(recordingURL, transcriptionID: transcriptionID)
-            state = .idle
-            suppressNextRecognitionError = false
         } catch {
             guard isActiveTranscription(transcriptionID), !Task.isCancelled else {
                 cleanupRecordingFile(recordingURL, transcriptionID: transcriptionID)

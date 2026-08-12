@@ -300,7 +300,6 @@ final class SectionVisibilitySettingsTests: XCTestCase {
 
     private let allKeys = [
         SectionVisibilitySettings.tasksKey,
-        SectionVisibilitySettings.kanbanKey,
         SectionVisibilitySettings.skillsKey,
         SectionVisibilitySettings.memoryKey,
         SectionVisibilitySettings.insightsKey,
@@ -360,7 +359,6 @@ final class SidebarSectionVisibilityTests: XCTestCase {
         let visibility = SidebarSectionVisibility.showAll
 
         XCTAssertTrue(visibility.tasks)
-        XCTAssertTrue(visibility.kanban)
         XCTAssertTrue(visibility.skills)
         XCTAssertTrue(visibility.memory)
         XCTAssertTrue(visibility.insights)
@@ -372,17 +370,15 @@ final class SidebarSectionVisibilityTests: XCTestCase {
     func testUtilityLinkRowSurvivesWhileAnySingleLinkIsShown() {
         var visibility = SidebarSectionVisibility.showAll
         visibility.tasks = false
-        visibility.kanban = false
         visibility.skills = false
         visibility.memory = false
 
         XCTAssertTrue(visibility.showsAnyUtilityLink)
     }
 
-    func testUtilityLinkRowDropsOnlyWhenAllFiveAreHidden() {
+    func testUtilityLinkRowDropsOnlyWhenAllFourAreHidden() {
         var visibility = SidebarSectionVisibility.showAll
         visibility.tasks = false
-        visibility.kanban = false
         visibility.skills = false
         visibility.memory = false
         visibility.insights = false

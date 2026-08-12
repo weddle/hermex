@@ -58,9 +58,6 @@ enum ServerSideAction: String, Equatable {
     case steer
     case interrupt
     case status
-    case btw
-    case background
-    case goal
 }
 
 enum SlashCommandSubArgs: Equatable {
@@ -70,5 +67,4 @@ enum SlashCommandSubArgs: Equatable {
     case reasoningLevels
     case workspaces
     case skills
-    case goalActions
 }

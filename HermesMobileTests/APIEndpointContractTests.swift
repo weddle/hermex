@@ -103,36 +103,6 @@ final class ContractReadinessTests: XCTestCase {
             ),
             .init(name: "chat steer", method: "POST", endpoint: .chatSteer, path: "/api/chat/steer"),
             .init(name: "goal", method: "POST", endpoint: .submitGoal, path: "/api/goal"),
-            .init(
-                name: "approval pending",
-                method: "GET",
-                endpoint: .approvalPending(sessionID: "session-123"),
-                path: "/api/approval/pending",
-                query: ["session_id": "session-123"]
-            ),
-            .init(
-                name: "approval stream",
-                method: "GET",
-                endpoint: .approvalStream(sessionID: "session-123"),
-                path: "/api/approval/stream",
-                query: ["session_id": "session-123"]
-            ),
-            .init(name: "approval respond", method: "POST", endpoint: .approvalRespond, path: "/api/approval/respond"),
-            .init(
-                name: "clarification pending",
-                method: "GET",
-                endpoint: .clarifyPending(sessionID: "session-123"),
-                path: "/api/clarify/pending",
-                query: ["session_id": "session-123"]
-            ),
-            .init(
-                name: "clarification stream",
-                method: "GET",
-                endpoint: .clarifyStream(sessionID: "session-123"),
-                path: "/api/clarify/stream",
-                query: ["session_id": "session-123"]
-            ),
-            .init(name: "clarification respond", method: "POST", endpoint: .clarifyRespond, path: "/api/clarify/respond"),
             .init(name: "btw", method: "POST", endpoint: .btw, path: "/api/btw"),
             .init(name: "background", method: "POST", endpoint: .background, path: "/api/background"),
             .init(

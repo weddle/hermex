@@ -41,13 +41,6 @@ struct SettingsView: View {
     @State private var isLoadingServerSettings = false
     @State private var serverVersion: String?
     @State private var serverSettingsError: String?
-    @State private var serverUpdateState: UpdatesCheckResponse.WebUIUpdateState?
-    @State private var updateApplyPhase: ServerUpdateApplyPhase = .idle
-    @State private var isConfirmingUpdate = false
-    @State private var updateApplyMessage: String?
-    @State private var isCheckingForUpdates = false
-    @State private var forcedCheckOutcome: UpdatesCheckResponse.ForcedCheckOutcome?
-    @State private var isPresentingForcedCheckResult = false
     @State private var defaultModel: String?
     @State private var defaultProfileName: String?
     @State private var defaultProfileDisplayName: String?
@@ -69,7 +62,6 @@ struct SettingsView: View {
     private var showsSubagentSessions = SessionRowDisplaySettings.defaultShowsSubagentSessions
     @State private var cliSessionsSync: CliSessionsSyncModel
     @AppStorage(StreamingSendBehavior.storageKey) private var streamingSendBehaviorRawValue = StreamingSendBehavior.steer.rawValue
-    @AppStorage(ComposerSTTProviderPreference.storageKey) private var sttProviderPreferenceRawValue = ComposerSTTProviderPreference.defaultValue.rawValue
     @AppStorage(ChatTranscriptDisplaySettings.showsThinkingAndToolCardsKey) private var showsThinkingAndToolCards = true
     @AppStorage(ChatTranscriptDisplaySettings.thinkingCardsStartExpandedKey) private var thinkingCardsStartExpanded = false
     @AppStorage(ChatTranscriptDisplaySettings.toolCardsStartExpandedKey) private var toolCardsStartExpanded = false
@@ -84,10 +76,8 @@ struct SettingsView: View {
     @AppStorage(SessionIdentitySettings.displayNameKey) private var identityDisplayName = ""
     @AppStorage(SessionIdentitySettings.initialsKey) private var identityInitials = ""
     @AppStorage(SectionVisibilitySettings.tasksKey) private var showsTasksSection = true
-    @AppStorage(SectionVisibilitySettings.kanbanKey) private var showsKanbanSection = true
     @AppStorage(SectionVisibilitySettings.skillsKey) private var showsSkillsSection = true
     @AppStorage(SectionVisibilitySettings.memoryKey) private var showsMemorySection = true
-    @AppStorage(SectionVisibilitySettings.insightsKey) private var showsInsightsSection = true
     @AppStorage(SectionVisibilitySettings.activeProfileKey) private var showsActiveProfileSection = true
     @AppStorage(SectionVisibilitySettings.projectsKey) private var showsProjectsSection = true
     @AppStorage(SectionVisibilitySettings.chatFilesKey) private var showsChatFilesButton = true
@@ -182,19 +172,7 @@ struct SettingsView: View {
                         }
                     }
 
-                    SettingsDivider()
-
-                    SettingsPickerRow(
-                        title: String(localized: "Dictation Provider"),
-                        systemImage: "mic",
-                        selection: $sttProviderPreferenceRawValue
-                    ) {
-                        ForEach(ComposerSTTProviderPreference.allCases) { preference in
-                            Text(preference.title).tag(preference.rawValue)
-                        }
-                    }
-
-                    SettingsFootnote(String(localized: "On-device only keeps composer dictation audio off your Hermes server."))
+                    SettingsFootnote(String(localized: "On-device dictation never sends audio to your Hermes server."))
                 }
 
                 SettingsCard(title: String(localized: "Chat")) {
@@ -319,14 +297,6 @@ struct SettingsView: View {
                     SettingsDivider()
 
                     SettingsToggleRow(
-                        title: String(localized: "Kanban"),
-                        systemImage: "rectangle.split.3x1",
-                        isOn: $showsKanbanSection
-                    )
-
-                    SettingsDivider()
-
-                    SettingsToggleRow(
                         title: String(localized: "Skills"),
                         systemImage: "hammer",
                         isOn: $showsSkillsSection
@@ -338,14 +308,6 @@ struct SettingsView: View {
                         title: String(localized: "Memory"),
                         systemImage: "brain",
                         isOn: $showsMemorySection
-                    )
-
-                    SettingsDivider()
-
-                    SettingsToggleRow(
-                        title: String(localized: "Insights"),
-                        systemImage: "chart.bar",
-                        isOn: $showsInsightsSection
                     )
 
                     SettingsDivider()
@@ -511,10 +473,6 @@ struct SettingsView: View {
                     SettingsValueRow(title: String(localized: "Version")) {
                         serverVersionContent
                     }
-
-                    serverUpdateCheckAction
-                    serverUpdateNote
-                    serverUpdateAction
                 }
 
                 SettingsCard(title: String(localized: "App")) {
@@ -596,38 +554,6 @@ struct SettingsView: View {
             }
         } message: {
             Text("This server's cached sessions and messages will be deleted. Other servers and online server data are not affected.")
-        }
-        .alert("Update server?", isPresented: $isConfirmingUpdate) {
-            Button("Cancel", role: .cancel) {}
-            Button("Update") {
-                Task {
-                    await applyServerUpdate()
-                }
-            }
-        } message: {
-            Text("This pulls the latest Hermes server version and restarts it. Active chats may be interrupted briefly; the app reconnects when the server is back.")
-        }
-        // Result of a manual "Check for updates" tap (#308). The outcome is kept
-        // set after dismissal so the title/message read off it without blanking
-        // mid-animation; a fresh check overwrites it before re-presenting.
-        .alert(
-            forcedCheckAlertTitle,
-            isPresented: $isPresentingForcedCheckResult
-        ) {
-            if case .updateAvailable = forcedCheckOutcome {
-                // The popup already carries the restart warning, so Update applies
-                // directly — no second confirmation dialog (issue #308).
-                Button("Update") {
-                    Task {
-                        await applyServerUpdate()
-                    }
-                }
-                Button("Dismiss", role: .cancel) {}
-            } else {
-                Button("OK", role: .cancel) {}
-            }
-        } message: {
-            Text(forcedCheckAlertMessage)
         }
         .alert("Sign out of this server?", isPresented: $isConfirmingReconfigure) {
             Button("Cancel", role: .cancel) {}
@@ -865,158 +791,6 @@ struct SettingsView: View {
         notificationStatusMessage ?? notificationPermissionStatus.map(notificationPermissionLabel)
     }
 
-    // True while the server is applying/restarting an update. The manual check
-    // button is disabled then so a forced check can't race the recovery poll.
-    private var isUpdateApplyInFlight: Bool {
-        switch updateApplyPhase {
-        case .applying, .recovering:
-            return true
-        case .idle, .blocked, .failed:
-            return false
-        }
-    }
-
-    // The manual "Check for updates" control (#308). Distinct from the passive
-    // on-open check: it forces a live git fetch on the server. While a check is in
-    // flight it swaps to a "Checking…" spinner; it's disabled during an apply so
-    // the two update flows never run at once.
-    @ViewBuilder
-    private var serverUpdateCheckAction: some View {
-        if isCheckingForUpdates {
-            updateProgressRow(String(localized: "Checking for updates…"))
-        } else {
-            SettingsButton(String(localized: "Check for updates")) {
-                Task {
-                    await checkForUpdatesManually()
-                }
-            }
-            .disabled(isUpdateApplyInFlight)
-            .padding(.top, 4)
-        }
-    }
-
-    private var forcedCheckAlertTitle: String {
-        switch forcedCheckOutcome {
-        case let .updateAvailable(behind):
-            return String(localized: "Update available · \(behind) behind")
-        case .upToDate:
-            return String(localized: "You're up to date")
-        case .disabled:
-            return String(localized: "Update checks are off")
-        case .error, .none:
-            return String(localized: "Couldn't check for updates")
-        }
-    }
-
-    private var forcedCheckAlertMessage: String {
-        switch forcedCheckOutcome {
-        case .updateAvailable:
-            return String(localized: "This pulls the latest Hermes server version and restarts it. Active chats may be interrupted briefly; the app reconnects when the server is back.")
-        case .upToDate:
-            return String(localized: "The Hermes server is running the latest version.")
-        case .disabled:
-            return String(localized: "Update checks are turned off on this server.")
-        case .error, .none:
-            return String(localized: "Something went wrong reaching the server. Try again in a moment.")
-        }
-    }
-
-    // Informational only — never a warning. A normal, up-to-date server shows a
-    // calm "Up to date"; a server that genuinely lags shows how far behind it is.
-    // When the check is disabled, errored, or hasn't loaded, we show nothing here
-    // and let the plain version row stand on its own.
-    @ViewBuilder
-    private var serverUpdateNote: some View {
-        if serverVersion != nil, let serverUpdateState {
-            switch serverUpdateState {
-            case .upToDate:
-                updateNoteRow(systemImage: "checkmark.circle", tint: .secondary, text: String(localized: "Up to date"))
-            case let .updateAvailable(behind):
-                updateNoteRow(systemImage: "arrow.up.circle", tint: .blue, text: String(localized: "Update available · \(behind) behind"))
-            case .unavailable:
-                EmptyView()
-            }
-        }
-    }
-
-    private func updateNoteRow(systemImage: String, tint: Color, text: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: systemImage)
-                .foregroundStyle(tint)
-
-            Text(text)
-                .font(AppFont.footnote())
-                .foregroundStyle(.secondary)
-        }
-        .accessibilityElement(children: .combine)
-    }
-
-    // The in-app "Update" action. Every phase resolves to a concrete UI so there
-    // is never a stuck spinner *or* a silent vanish: the initial Update button is
-    // gated on the server reporting a pending update, but once a run is underway
-    // the progress / blocked / failed UI is driven purely by `updateApplyPhase`.
-    // That keeps the message + Retry visible even if a slow/failed restart leaves
-    // `serverUpdateState` nil or stale. Success returns to `.idle`, where the
-    // refreshed `.upToDate` state removes the button.
-    @ViewBuilder
-    private var serverUpdateAction: some View {
-        switch updateApplyPhase {
-        case .idle:
-            if serverVersion != nil, case .updateAvailable = serverUpdateState {
-                updateActionButton(title: String(localized: "Update"))
-            }
-        case .applying:
-            updateProgressRow(String(localized: "Starting update…"))
-        case .recovering:
-            updateProgressRow(String(localized: "Updating & restarting…"))
-        case .blocked:
-            VStack(alignment: .leading, spacing: 10) {
-                updateMessageRow(systemImage: "clock", tint: .secondary)
-                updateActionButton(title: String(localized: "Retry update"))
-            }
-        case .failed:
-            VStack(alignment: .leading, spacing: 10) {
-                updateMessageRow(systemImage: "exclamationmark.triangle", tint: .orange)
-                updateActionButton(title: String(localized: "Retry update"))
-            }
-        }
-    }
-
-    private func updateActionButton(title: String) -> some View {
-        SettingsButton(title) {
-            isConfirmingUpdate = true
-        }
-        // Mirror of the check button's `isUpdateApplyInFlight` guard: while a
-        // forced check is running, block Update/Retry so apply can't race the
-        // in-flight POST /api/updates/check (#308 review).
-        .disabled(isCheckingForUpdates)
-        .padding(.top, 4)
-    }
-
-    private func updateProgressRow(_ text: String) -> some View {
-        HStack(spacing: 8) {
-            ProgressView()
-
-            Text(text)
-                .font(AppFont.footnote())
-                .foregroundStyle(.secondary)
-        }
-        .padding(.top, 4)
-        .accessibilityElement(children: .combine)
-    }
-
-    private func updateMessageRow(systemImage: String, tint: Color) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: systemImage)
-                .foregroundStyle(tint)
-
-            Text(updateApplyMessage ?? String(localized: "The update could not be applied."))
-                .font(AppFont.footnote())
-                .foregroundStyle(.secondary)
-        }
-        .accessibilityElement(children: .combine)
-    }
-
     private func loadServerSettings() async {
         guard !isLoadingServerSettings else {
             return
@@ -1026,7 +800,6 @@ struct SettingsView: View {
         isLoadingDefaultModel = true
         isLoadingDefaultProfile = true
         serverSettingsError = nil
-        serverUpdateState = nil
         let client = APIClient(baseURL: server)
 
         do {
@@ -1045,15 +818,6 @@ struct SettingsView: View {
         }
 
         isLoadingServerSettings = false
-
-        do {
-            let updates = try await client.updatesCheck()
-            serverUpdateState = updates.webuiUpdateState
-        } catch {
-            // Non-fatal: update availability is optional info. On any failure we
-            // degrade to showing the version only, with no indicator.
-            serverUpdateState = nil
-        }
 
         do {
             let catalog = try await client.models()
@@ -1076,143 +840,6 @@ struct SettingsView: View {
         }
 
         isLoadingDefaultProfile = false
-    }
-
-    private func checkForUpdatesManually() async {
-        // Ignore taps while a check is already running or an apply/restart is in
-        // flight — both would race the shared `serverUpdateState`.
-        guard !isCheckingForUpdates, !isUpdateApplyInFlight else {
-            return
-        }
-
-        isCheckingForUpdates = true
-        let client = APIClient(baseURL: server)
-
-        do {
-            let response = try await client.updatesCheckForced()
-            // Refresh the passive inline indicator from the fresh result too, so a
-            // forced check keeps the on-open note in sync (issue #308).
-            serverUpdateState = response.webuiUpdateState
-            forcedCheckOutcome = response.forcedCheckOutcome
-        } catch {
-            authManager.handleAPIError(error)
-            forcedCheckOutcome = .error
-        }
-
-        isCheckingForUpdates = false
-        isPresentingForcedCheckResult = true
-    }
-
-    private func applyServerUpdate() async {
-        // Never start an apply while a forced check is in flight — the two race
-        // the same server-side git state, and the check's completion would
-        // overwrite update state / present its popup mid-apply. The inline
-        // Update button is also disabled then; this guards the path regardless
-        // (e.g. a tap that slips through the confirm dialog). The forced-check
-        // popup's own Update is safe: `isCheckingForUpdates` is already false
-        // before that popup presents (#308 review).
-        guard !isCheckingForUpdates else { return }
-
-        // Allow a fresh attempt only from a resting phase; ignore taps while a
-        // request is in flight or the server is mid-restart.
-        switch updateApplyPhase {
-        case .idle, .blocked, .failed:
-            break
-        case .applying, .recovering:
-            return
-        }
-
-        updateApplyPhase = .applying
-        updateApplyMessage = nil
-        let client = APIClient(baseURL: server)
-
-        let response: UpdatesApplyResponse
-        do {
-            response = try await client.applyUpdate(target: "webui")
-        } catch {
-            // The apply call returns before the server restarts, so a failure
-            // here is a real pre-restart error (auth, unreachable, decode).
-            authManager.handleAPIError(error)
-            updateApplyMessage = String(localized: "Could not reach the server to start the update.")
-            updateApplyPhase = .failed
-            return
-        }
-
-        switch response.outcome {
-        case .applying:
-            updateApplyPhase = .recovering
-            await waitForServerToReturn(using: client, previousVersion: serverVersion)
-        case .restartBlocked:
-            updateApplyMessage = response.displayMessage(
-                default: String(localized: "The server is busy with active work. Wait for it to finish, then retry.")
-            )
-            updateApplyPhase = .blocked
-        case .failed:
-            updateApplyMessage = response.displayMessage(
-                default: String(localized: "The update could not be applied.")
-            )
-            updateApplyPhase = .failed
-        }
-    }
-
-    /// Polls the self-restarting server until the restart is confirmed, then
-    /// refreshes the version and indicator. Bounded so a slow/stuck restart
-    /// never leaves a spinner up.
-    ///
-    /// Completion requires *proof the restart happened* — the reported version
-    /// changed, or the check explicitly reports `.upToDate` — not merely a
-    /// reachable server. That avoids finalising against the outgoing process or
-    /// on a transient `stale_check` that still claims a non-zero `behind`, while
-    /// still letting update-check-disabled servers converge via the new version.
-    /// State is refreshed inline (not via the non-reentrant `loadServerSettings`)
-    /// so a concurrent load can't make us flip to `.idle` without refreshing.
-    private func waitForServerToReturn(using client: APIClient, previousVersion: String?) async {
-        let maxAttempts = 30 // ~60s at a 2s cadence — generous for a self-restart.
-
-        for _ in 0..<maxAttempts {
-            guard !Task.isCancelled else { return }
-            // Wait first: the server flushes the response, then restarts ~2s
-            // later, so an immediate probe could hit the outgoing process.
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            guard !Task.isCancelled else { return }
-
-            // One reachable settings call gives us both liveness and the fresh
-            // version; a nil result means the restart outage hasn't cleared yet.
-            guard let settings = try? await client.settings() else {
-                continue
-            }
-
-            let newVersion = settings.webuiVersion
-            let updateState = (try? await client.updatesCheck())?.webuiUpdateState ?? .unavailable
-            let restartConfirmed = (newVersion != nil && newVersion != previousVersion)
-                || updateState == .upToDate
-
-            if restartConfirmed {
-                serverVersion = newVersion
-                serverSettingsError = newVersion == nil ? String(localized: "Unknown") : nil
-                serverUpdateState = updateState
-                updateApplyPhase = .idle
-                updateApplyMessage = nil
-                return
-            }
-        }
-
-        // Didn't confirm the restart in the window. Refresh once so the indicator
-        // reflects reality, then surface a distinct, retryable failure — never a
-        // silent reset (the `.failed` UI stays visible regardless of the now
-        // possibly-nil `serverUpdateState`).
-        await loadServerSettings()
-        if serverSettingsError != nil {
-            updateApplyMessage = String(localized: "The server didn't come back after the update. Check the server, then retry.")
-            updateApplyPhase = .failed
-        } else if case .updateAvailable = serverUpdateState {
-            updateApplyMessage = String(localized: "The update is taking longer than expected to finish. Try again in a moment.")
-            updateApplyPhase = .failed
-        } else {
-            // Server is back and not reporting a pending update — treat as done.
-            updateApplyPhase = .idle
-            updateApplyMessage = nil
-        }
     }
 
     private func clearOfflineCache() async {
@@ -1285,20 +912,6 @@ struct SettingsView: View {
             return String(localized: "Notifications unavailable.")
         }
     }
-}
-
-/// Phases of the in-app "apply webui update" flow (issue #180).
-private enum ServerUpdateApplyPhase: Equatable {
-    /// No update in flight; show the "Update" button.
-    case idle
-    /// The apply request is in flight (before the server confirms a restart).
-    case applying
-    /// Server accepted the update and is restarting; we are polling for it.
-    case recovering
-    /// Restart was blocked by active chat/agent work; offer a retry.
-    case blocked
-    /// The update failed (conflict, diverged, unreachable, or timed-out restart).
-    case failed
 }
 
 private extension UNAuthorizationStatus {

@@ -139,35 +139,6 @@ enum SlashCommandCatalog {
             description: String(localized: "Show session status"),
             noEcho: false,
             handler: .serverSide(.status)
-        ),
-        SlashCommand(
-            name: "goal",
-            description: String(localized: "Set or inspect a persistent goal"),
-            argHint: "[status|pause|resume|clear|text]",
-            noEcho: true,
-            handler: .serverSide(.goal),
-            subArgs: .goalActions
-        ),
-        SlashCommand(
-            name: "btw",
-            description: String(localized: "Ask a side question"),
-            argHint: String(localized: "question"),
-            noEcho: true,
-            handler: .serverSide(.btw)
-        ),
-        SlashCommand(
-            name: "background",
-            description: String(localized: "Run a parallel task"),
-            argHint: String(localized: "prompt"),
-            noEcho: true,
-            handler: .serverSide(.background)
-        ),
-        SlashCommand(
-            name: "bg",
-            description: String(localized: "Alias for \("/background")"),
-            argHint: String(localized: "prompt"),
-            noEcho: true,
-            handler: .serverSide(.background)
         )
     ]
 
@@ -186,5 +157,4 @@ enum SlashCommandCatalog {
     }
 
     static let reasoningLevels = ["show", "hide", "none", "minimal", "low", "medium", "high", "xhigh"]
-    static let goalActions = ["status", "pause", "resume", "clear"]
 }

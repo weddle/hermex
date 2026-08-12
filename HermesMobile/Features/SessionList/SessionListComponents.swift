@@ -74,28 +74,24 @@ enum SessionListMotion {
 /// hide the parts of the app they never use (issue #189).
 struct SidebarSectionVisibility: Equatable {
     var tasks: Bool
-    var kanban: Bool
     var skills: Bool
     var memory: Bool
-    var insights: Bool
     var activeProfile: Bool
     var projects: Bool
 
     /// Show every row, primarily for previews and tests.
     static let showAll = SidebarSectionVisibility(
         tasks: true,
-        kanban: true,
         skills: true,
         memory: true,
-        insights: true,
         activeProfile: true,
         projects: true
     )
 
-    /// The five plain links share one List row, so that row is dropped entirely
+    /// The four plain links share one List row, so that row is dropped entirely
     /// once all of them are hidden rather than leaving an empty padded gap.
     var showsAnyUtilityLink: Bool {
-        tasks || kanban || skills || memory || insights
+        tasks || skills || memory
     }
 }
 
@@ -185,12 +181,6 @@ struct SessionSidebarUtilityRows: View {
                 }
             }
 
-            if sectionVisibility.kanban {
-                SidebarNavButton(title: String(localized: "Kanban"), assetImage: "LucideColumns3") {
-                    openDestination(.kanban)
-                }
-            }
-
             if sectionVisibility.skills {
                 SidebarNavButton(title: String(localized: "Skills"), assetImage: "LucideHammer") {
                     openDestination(.skills)
@@ -200,12 +190,6 @@ struct SessionSidebarUtilityRows: View {
             if sectionVisibility.memory {
                 SidebarNavButton(title: String(localized: "Memory"), assetImage: "LucideBrain") {
                     openDestination(.memory)
-                }
-            }
-
-            if sectionVisibility.insights {
-                SidebarNavButton(title: String(localized: "Insights"), assetImage: "LucideChartColumnIncreasing") {
-                    openDestination(.insights)
                 }
             }
         }

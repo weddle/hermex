@@ -344,15 +344,13 @@ struct SlashCommandAutocompleteView: View {
             return personalitySuggestions
         case .skills:
             return skillSuggestions.map(\.slashName)
-        case .goalActions:
-            return SlashCommandCatalog.goalActions
         case .none:
             return []
         }
     }
 
     private func subArgDisplayText(_ item: String, for command: SlashCommand) -> String {
-        command.subArgs == .goalActions ? "/\(command.name) \(item)" : item
+        item
     }
 
     private func filteredSubArgs(for command: SlashCommand) -> [String] {

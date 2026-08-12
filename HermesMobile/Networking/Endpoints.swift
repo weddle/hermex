@@ -29,20 +29,8 @@ enum Endpoint {
     case renameProject
     case deleteProject
     case chatStart
-    case chatStream(streamID: String)
-    case chatCancel(streamID: String)
     case chatStreamStatus(streamID: String)
     case chatSteer
-    case submitGoal
-    case approvalPending(sessionID: String)
-    case approvalStream(sessionID: String)
-    case approvalRespond
-    case clarifyPending(sessionID: String)
-    case clarifyStream(sessionID: String)
-    case clarifyRespond
-    case btw
-    case background
-    case backgroundStatus(sessionID: String)
     case workspaces
     case workspaceSuggestions(prefix: String)
     case workspaceAdd
@@ -81,9 +69,6 @@ enum Endpoint {
     case createProfile
     case providers
     case settings
-    case updatesCheck
-    case updatesApply
-    case insights(days: Int)
     case crons
     case cronCreate
     case cronUpdate
@@ -94,37 +79,12 @@ enum Endpoint {
     case cronStatus(jobID: String?)
     case cronOutput(jobID: String, limit: Int?)
     case cronDeliveryOptions
-    case kanbanConfig
-    case kanbanBoards
-    case kanbanCreateBoard
-    case kanbanEditBoard(KanbanEditBoardRequest)
-    case kanbanArchiveBoard(KanbanBoardMutationRequest)
-    case kanbanMakeBoardActive(KanbanBoardMutationRequest)
-    case kanbanDispatch(KanbanDispatchRequest)
-    case kanbanBoard(KanbanBoardRequest)
-    case kanbanStats(board: String)
-    case kanbanAssignees(board: String)
-    case kanbanEvents(KanbanEventsRequest)
-    case kanbanEventsStream(KanbanEventsStreamRequest)
-    case kanbanCardDetail(KanbanCardDetailRequest)
-    case kanbanWorkerLog(KanbanWorkerLogRequest)
-    case kanbanAddComment(KanbanAddCommentRequest)
-    case kanbanCreateCard(KanbanCreateCardRequest)
-    case kanbanBulkAction(KanbanBulkActionRequest)
-    case kanbanEditCard(KanbanEditCardRequest)
-    case kanbanCardStatus(KanbanCardStatusRequest)
-    case kanbanBlockCard(KanbanCardActionRequest)
-    case kanbanUnblockCard(KanbanCardActionRequest)
-    case kanbanAddDependency(KanbanDependencyMutationRequest)
-    case kanbanRemoveDependency(KanbanDependencyMutationRequest)
     case memory
     case memoryWrite
     case skills
     case skillContent(name: String, file: String?)
     case toggleSkill
     case upload
-    case transcribe
-    case tts
 
     var path: String {
         switch self {
@@ -184,34 +144,10 @@ enum Endpoint {
             return "/api/projects/delete"
         case .chatStart:
             return "/api/chat/start"
-        case .chatStream:
-            return "/api/chat/stream"
-        case .chatCancel:
-            return "/api/chat/cancel"
         case .chatStreamStatus:
             return "/api/chat/stream/status"
         case .chatSteer:
             return "/api/chat/steer"
-        case .submitGoal:
-            return "/api/goal"
-        case .approvalPending:
-            return "/api/approval/pending"
-        case .approvalStream:
-            return "/api/approval/stream"
-        case .approvalRespond:
-            return "/api/approval/respond"
-        case .clarifyPending:
-            return "/api/clarify/pending"
-        case .clarifyStream:
-            return "/api/clarify/stream"
-        case .clarifyRespond:
-            return "/api/clarify/respond"
-        case .btw:
-            return "/api/btw"
-        case .background:
-            return "/api/background"
-        case .backgroundStatus:
-            return "/api/background/status"
         case .workspaces:
             return "/api/workspaces"
         case .workspaceSuggestions:
@@ -288,12 +224,6 @@ enum Endpoint {
             return "/api/providers"
         case .settings:
             return "/api/settings"
-        case .updatesCheck:
-            return "/api/updates/check"
-        case .updatesApply:
-            return "/api/updates/apply"
-        case .insights:
-            return "/api/insights"
         case .crons:
             return "/api/crons"
         case .cronCreate:
@@ -314,50 +244,6 @@ enum Endpoint {
             return "/api/crons/output"
         case .cronDeliveryOptions:
             return "/api/crons/delivery-options"
-        case .kanbanConfig:
-            return "/api/kanban/config"
-        case .kanbanBoards, .kanbanCreateBoard:
-            return "/api/kanban/boards"
-        case let .kanbanEditBoard(request):
-            return "/api/kanban/boards/\(request.slug)"
-        case let .kanbanArchiveBoard(request):
-            return "/api/kanban/boards/\(request.slug)"
-        case let .kanbanMakeBoardActive(request):
-            return "/api/kanban/boards/\(request.slug)/switch"
-        case .kanbanDispatch:
-            return "/api/kanban/dispatch"
-        case .kanbanBoard:
-            return "/api/kanban/board"
-        case .kanbanStats:
-            return "/api/kanban/stats"
-        case .kanbanAssignees:
-            return "/api/kanban/assignees"
-        case .kanbanEvents:
-            return "/api/kanban/events"
-        case .kanbanEventsStream:
-            return "/api/kanban/events/stream"
-        case let .kanbanCardDetail(request):
-            return "/api/kanban/tasks/\(request.cardID)"
-        case let .kanbanWorkerLog(request):
-            return "/api/kanban/tasks/\(request.cardID)/log"
-        case let .kanbanAddComment(request):
-            return "/api/kanban/tasks/\(request.cardID)/comments"
-        case .kanbanCreateCard:
-            return "/api/kanban/tasks"
-        case .kanbanBulkAction:
-            return "/api/kanban/tasks/bulk"
-        case let .kanbanEditCard(request):
-            return "/api/kanban/tasks/\(request.cardID)"
-        case let .kanbanCardStatus(request):
-            return "/api/kanban/tasks/\(request.cardID)"
-        case let .kanbanBlockCard(request):
-            return "/api/kanban/tasks/\(request.cardID)/block"
-        case let .kanbanUnblockCard(request):
-            return "/api/kanban/tasks/\(request.cardID)/unblock"
-        case .kanbanAddDependency:
-            return "/api/kanban/links"
-        case .kanbanRemoveDependency:
-            return "/api/kanban/links/delete"
         case .memory:
             return "/api/memory"
         case .memoryWrite:
@@ -370,10 +256,6 @@ enum Endpoint {
             return "/api/skills/toggle"
         case .upload:
             return "/api/upload"
-        case .transcribe:
-            return "/api/transcribe"
-        case .tts:
-            return "/api/tts"
         }
     }
 
@@ -421,9 +303,7 @@ enum Endpoint {
             return items
         case let .sessionStatus(id):
             return [URLQueryItem(name: "session_id", value: id)]
-        case let .chatStream(streamID),
-            let .chatCancel(streamID),
-            let .chatStreamStatus(streamID):
+        case let .chatStreamStatus(streamID):
             return [URLQueryItem(name: "stream_id", value: streamID)]
         case let .sessionYolo(sessionID):
             guard let sessionID else { return [] }
@@ -433,13 +313,6 @@ enum Endpoint {
                 URLQueryItem(name: "session_id", value: sessionID),
                 URLQueryItem(name: "format", value: format.rawValue)
             ]
-        case let .approvalPending(sessionID),
-            let .approvalStream(sessionID),
-            let .clarifyPending(sessionID),
-            let .clarifyStream(sessionID):
-            return [URLQueryItem(name: "session_id", value: sessionID)]
-        case let .backgroundStatus(sessionID):
-            return [URLQueryItem(name: "session_id", value: sessionID)]
         case let .directoryList(sessionID, path):
             var items = [URLQueryItem(name: "session_id", value: sessionID)]
             if let path {
@@ -478,34 +351,6 @@ enum Endpoint {
                 items.append(URLQueryItem(name: "limit", value: "\(limit)"))
             }
             return items
-        case let .kanbanBoard(request):
-            return request.queryItems
-        case let .kanbanDispatch(request):
-            return request.queryItems
-        case let .kanbanStats(board), let .kanbanAssignees(board):
-            return [URLQueryItem(name: "board", value: board)]
-        case let .kanbanEvents(request):
-            return request.queryItems
-        case let .kanbanEventsStream(request):
-            return request.queryItems
-        case let .kanbanCardDetail(request):
-            return request.queryItems
-        case let .kanbanWorkerLog(request):
-            return request.queryItems
-        case let .kanbanAddComment(request):
-            return request.queryItems
-        case let .kanbanCreateCard(request):
-            return request.queryItems
-        case let .kanbanBulkAction(request):
-            return request.queryItems
-        case let .kanbanEditCard(request):
-            return request.queryItems
-        case let .kanbanCardStatus(request):
-            return request.queryItems
-        case let .kanbanBlockCard(request), let .kanbanUnblockCard(request):
-            return request.queryItems
-        case let .kanbanAddDependency(request), let .kanbanRemoveDependency(request):
-            return request.queryItems
         case let .reasoning(model, provider):
             var items: [URLQueryItem] = []
             if let model, !model.isEmpty {
@@ -515,8 +360,6 @@ enum Endpoint {
                 items.append(URLQueryItem(name: "provider", value: provider))
             }
             return items
-        case let .insights(days):
-            return [URLQueryItem(name: "days", value: "\(days)")]
         case let .skillContent(name, file):
             var items = [URLQueryItem(name: "name", value: name)]
             if let file {
@@ -529,31 +372,7 @@ enum Endpoint {
     }
 
     func url(relativeTo baseURL: URL) -> URL {
-        let url: URL
-        switch self {
-        case let .kanbanCardDetail(request):
-            url = kanbanTaskURL(relativeTo: baseURL, cardID: request.cardID)
-        case let .kanbanEditBoard(request):
-            url = kanbanBoardURL(relativeTo: baseURL, slug: request.slug)
-        case let .kanbanArchiveBoard(request):
-            url = kanbanBoardURL(relativeTo: baseURL, slug: request.slug)
-        case let .kanbanMakeBoardActive(request):
-            url = kanbanBoardURL(relativeTo: baseURL, slug: request.slug, suffix: "/switch")
-        case let .kanbanWorkerLog(request):
-            url = kanbanTaskURL(relativeTo: baseURL, cardID: request.cardID, suffix: "/log")
-        case let .kanbanAddComment(request):
-            url = kanbanTaskURL(relativeTo: baseURL, cardID: request.cardID, suffix: "/comments")
-        case let .kanbanEditCard(request):
-            url = kanbanTaskURL(relativeTo: baseURL, cardID: request.cardID)
-        case let .kanbanCardStatus(request):
-            url = kanbanTaskURL(relativeTo: baseURL, cardID: request.cardID)
-        case let .kanbanBlockCard(request):
-            url = kanbanTaskURL(relativeTo: baseURL, cardID: request.cardID, suffix: "/block")
-        case let .kanbanUnblockCard(request):
-            url = kanbanTaskURL(relativeTo: baseURL, cardID: request.cardID, suffix: "/unblock")
-        default:
-            url = baseURL.appending(path: path)
-        }
+        let url = baseURL.appending(path: path)
         guard !queryItems.isEmpty else {
             return url
         }
@@ -562,32 +381,4 @@ enum Endpoint {
         components?.queryItems = queryItems
         return components?.url ?? url
     }
-
-    private func kanbanTaskURL(relativeTo baseURL: URL, cardID: String, suffix: String = "") -> URL {
-        let root = baseURL.appending(path: "/api/kanban/tasks")
-        guard var components = URLComponents(url: root, resolvingAgainstBaseURL: false),
-              let encodedCardID = cardID.addingPercentEncoding(withAllowedCharacters: Self.pathSegmentAllowed)
-        else {
-            return root
-        }
-        components.percentEncodedPath += "/\(encodedCardID)\(suffix)"
-        return components.url ?? root
-    }
-
-    private func kanbanBoardURL(relativeTo baseURL: URL, slug: String, suffix: String = "") -> URL {
-        let root = baseURL.appending(path: "/api/kanban/boards")
-        guard var components = URLComponents(url: root, resolvingAgainstBaseURL: false),
-              let encodedSlug = slug.addingPercentEncoding(withAllowedCharacters: Self.pathSegmentAllowed)
-        else {
-            return root
-        }
-        components.percentEncodedPath += "/\(encodedSlug)\(suffix)"
-        return components.url ?? root
-    }
-
-    /// RFC 3986 unreserved characters minus `.`. Encoding dots as well keeps
-    /// the special `.` and `..` path segments inert while preserving the exact
-    /// Card identity after the server decodes the segment.
-    private static let pathSegmentAllowed = CharacterSet.alphanumerics
-        .union(CharacterSet(charactersIn: "-_~"))
 }

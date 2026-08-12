@@ -1,145 +1,8 @@
 import Foundation
 import AVFoundation
-import MediaPlayer
 import Observation
+import Speech
 import SwiftData
-
-enum ListenPlaybackPhase: Equatable {
-    case idle
-    case loading
-    case playing
-    case paused
-}
-
-enum ListenPlaybackSpeed: Double, CaseIterable, Identifiable {
-    case half = 0.5
-    case normal = 1
-    case oneAndHalf = 1.5
-    case double = 2
-
-    static let storageKey = "Chat.listenPlaybackSpeed"
-    static let defaultValue: ListenPlaybackSpeed = .normal
-
-    var id: Double { rawValue }
-
-    var title: String {
-        switch self {
-        case .half:
-            return "0.5x"
-        case .normal:
-            return "1x"
-        case .oneAndHalf:
-            return "1.5x"
-        case .double:
-            return "2x"
-        }
-    }
-
-    static func stored(in userDefaults: UserDefaults) -> ListenPlaybackSpeed {
-        let storedValue = userDefaults.double(forKey: storageKey)
-        return allCases.first { abs($0.rawValue - storedValue) < 0.001 } ?? defaultValue
-    }
-}
-
-struct ListenNowPlayingSnapshot: Equatable {
-    let title: String
-    let duration: TimeInterval
-    let elapsedTime: TimeInterval
-    let speed: ListenPlaybackSpeed
-    let isPlaying: Bool
-}
-
-@MainActor
-protocol ListenRemoteControlControlling {
-    func configure(
-        play: @escaping @MainActor () -> Void,
-        pause: @escaping @MainActor () -> Void,
-        togglePlayPause: @escaping @MainActor () -> Void,
-        changePlaybackPosition: @escaping @MainActor (TimeInterval) -> Void
-    )
-    func update(_ snapshot: ListenNowPlayingSnapshot)
-    func clear()
-}
-
-@MainActor
-final class ListenRemoteControlController: ListenRemoteControlControlling {
-    private var commandTargets: [(MPRemoteCommand, Any)] = []
-
-    deinit {
-        commandTargets.forEach { command, target in
-            command.removeTarget(target)
-            command.isEnabled = false
-        }
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-        MPNowPlayingInfoCenter.default().playbackState = .stopped
-    }
-
-    func configure(
-        play: @escaping @MainActor () -> Void,
-        pause: @escaping @MainActor () -> Void,
-        togglePlayPause: @escaping @MainActor () -> Void,
-        changePlaybackPosition: @escaping @MainActor (TimeInterval) -> Void
-    ) {
-        clearCommandTargets()
-
-        let commandCenter = MPRemoteCommandCenter.shared()
-        commandCenter.playCommand.isEnabled = true
-        commandTargets.append((commandCenter.playCommand, commandCenter.playCommand.addTarget { _ in
-            Task { @MainActor in play() }
-            return .success
-        }))
-
-        commandCenter.pauseCommand.isEnabled = true
-        commandTargets.append((commandCenter.pauseCommand, commandCenter.pauseCommand.addTarget { _ in
-            Task { @MainActor in pause() }
-            return .success
-        }))
-
-        commandCenter.togglePlayPauseCommand.isEnabled = true
-        commandTargets.append((commandCenter.togglePlayPauseCommand, commandCenter.togglePlayPauseCommand.addTarget { _ in
-            Task { @MainActor in togglePlayPause() }
-            return .success
-        }))
-
-        commandCenter.changePlaybackPositionCommand.isEnabled = true
-        commandTargets.append((
-            commandCenter.changePlaybackPositionCommand,
-            commandCenter.changePlaybackPositionCommand.addTarget { event in
-                guard let event = event as? MPChangePlaybackPositionCommandEvent else {
-                    return .commandFailed
-                }
-                Task { @MainActor in changePlaybackPosition(event.positionTime) }
-                return .success
-            }
-        ))
-    }
-
-    func update(_ snapshot: ListenNowPlayingSnapshot) {
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = [
-            MPMediaItemPropertyTitle: snapshot.title,
-            MPMediaItemPropertyArtist: "Hermex",
-            MPMediaItemPropertyPlaybackDuration: max(0, snapshot.duration),
-            MPNowPlayingInfoPropertyElapsedPlaybackTime: max(0, snapshot.elapsedTime),
-            MPNowPlayingInfoPropertyPlaybackRate: snapshot.isPlaying ? snapshot.speed.rawValue : 0,
-            MPNowPlayingInfoPropertyDefaultPlaybackRate: snapshot.speed.rawValue
-        ]
-        MPNowPlayingInfoCenter.default().playbackState = snapshot.isPlaying ? .playing : .paused
-    }
-
-    func clear() {
-        clearCommandTargets()
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-        MPNowPlayingInfoCenter.default().playbackState = .stopped
-    }
-
-    private func clearCommandTargets() {
-        commandTargets.forEach { command, target in
-            command.removeTarget(target)
-            command.isEnabled = false
-        }
-        commandTargets.removeAll()
-    }
-}
 
 struct ApprovalPromptState: Equatable, Identifiable {
     var id: String {
@@ -359,10 +222,6 @@ final class ChatViewModel {
     var clarificationPrompt: ClarificationPromptState? { pendingActionCoordinator.clarificationPrompt }
     var isRespondingToClarification: Bool { pendingActionCoordinator.isRespondingToClarification }
     var clarificationErrorMessage: String? { pendingActionCoordinator.clarificationErrorMessage }
-    private(set) var currentGoal: SubmittedGoal?
-    private(set) var isSubmittingGoal = false
-    private(set) var goalErrorMessage: String?
-    private(set) var hasActivatedGoalCommand = false
 
     private let sessionID: String?
     private var currentWorkspace: String?
@@ -375,11 +234,9 @@ final class ChatViewModel {
     private let streamCoordinator: ChatStreamCoordinator
     private let pendingActionCoordinator: ChatPendingActionCoordinator
     private let attachmentCoordinator: ChatAttachmentCoordinator
-    private let btwStreamClient: SSEStreamingClient
     private let liveActivityManager: any AgentLiveActivityManaging
     private let speechSynthesizerFactory: () -> any ChatSpeechSynthesizing
     private let listenAudioSession: any ListenAudioSessionControlling
-    private let listenRemoteControlCenter: any ListenRemoteControlControlling
     private let userDefaults: UserDefaults
     private let pollingIntervals: ChatPollingIntervals
     // Real-time window over which rapid streaming updates coalesce into a single
@@ -399,30 +256,6 @@ final class ChatViewModel {
     // from a superseded utterance (e.g. switching messages mid-playback) is ignored so
     // it can't clear the new listen state or deactivate the session. See #252.
     private var activeListeningUtteranceID: ObjectIdentifier?
-    // Server-TTS playback seam (#15): the factory builds an audio player from the
-    // server's synthesized bytes; injectable so tests never construct a real
-    // `AVAudioPlayer` (which requires decodable audio data).
-    private let serverTTSAudioPlayerFactory: @MainActor (Data) throws -> any ListenAudioPlaying
-    private var listenAudioPlayer: (any ListenAudioPlaying)?
-    // Identity of the server-TTS player currently playing. Mirrors
-    // `activeListeningUtteranceID`: a stale finish callback from a superseded player
-    // must not clear the new listen state or deactivate the session.
-    private var activeListenPlayerID: ObjectIdentifier?
-    // In-flight `POST /api/tts` fetch for the Listen action. Cancelled by
-    // `stopListening()`; exposed (read-only) so tests can await the async
-    // server-first path deterministically.
-    @ObservationIgnored private(set) var listenPreparationTask: Task<Void, Never>?
-    // Identity of the Listen request the in-flight fetch belongs to. A response
-    // arriving after stop/switch carries a stale ID and is dropped instead of
-    // starting audio the user no longer wants.
-    private var activeListenRequestID: UUID?
-    private var listenPlaybackTitle = String(localized: "Hermex response")
-    private(set) var listenPlaybackPhase: ListenPlaybackPhase = .idle
-    private(set) var listenPlaybackElapsedTime: TimeInterval = 0
-    private(set) var listenPlaybackDuration: TimeInterval = 0
-    private(set) var listenPlaybackScrubTime: TimeInterval?
-    private(set) var listenPlaybackSpeed: ListenPlaybackSpeed
-    @ObservationIgnored private var listenPlaybackTicker: Timer?
     private var showsLiveActivityResponseExcerpts: Bool
     private var hasCompletedCurrentResponse: Bool { streamCoordinator.hasCompletedCurrentResponse }
     private var isStreamConnectionSuspended: Bool { streamCoordinator.isConnectionSuspended }
@@ -433,12 +266,6 @@ final class ChatViewModel {
     private var isLoadingSkillSlashSuggestions = false
     private var queuedSlashMessages: [QueuedSlashMessage] = []
     private var isDrainingQueuedSlashMessage = false
-    private var activeBtwStreamID: String?
-    private var activeBtwMessageID: String?
-    private var activeBtwQuestion: String?
-    private var activeBtwAnswer = ""
-    private var backgroundPromptsByTaskID: [String: String] = [:]
-    @ObservationIgnored private var backgroundPollTask: Task<Void, Never>?
     private var isRefreshingCompletedResponseTitle = false
     private var isActiveStreamReplayConnection: Bool { streamCoordinator.isReplayConnection }
     private var activeStreamReplayMatchedPrefixLength = 0
@@ -454,10 +281,6 @@ final class ChatViewModel {
         session: SessionSummary,
         server: URL,
         client: APIClient? = nil,
-        streamClient: SSEStreamingClient? = nil,
-        approvalStreamClient: SSEStreamingClient? = nil,
-        clarifyStreamClient: SSEStreamingClient? = nil,
-        btwStreamClient: SSEStreamingClient? = nil,
         liveActivityManager: (any AgentLiveActivityManaging)? = nil,
         showsLiveActivityResponseExcerpts: Bool = false,
         pollingIntervals: ChatPollingIntervals = .standard,
@@ -466,8 +289,6 @@ final class ChatViewModel {
         streamingMaxRevealLagNanoseconds: UInt64 = 1_000_000_000,
         speechSynthesizerFactory: @escaping () -> any ChatSpeechSynthesizing = { AVSpeechSynthesizer() },
         listenAudioSession: (any ListenAudioSessionControlling)? = nil,
-        listenRemoteControlCenter: (any ListenRemoteControlControlling)? = nil,
-        serverTTSAudioPlayerFactory: (@MainActor (Data) throws -> any ListenAudioPlaying)? = nil,
         userDefaults: UserDefaults = .standard
     ) {
         sessionID = session.sessionId
@@ -489,7 +310,6 @@ final class ChatViewModel {
             client: resolvedClient
         )
         self.attachmentCoordinator = ChatAttachmentCoordinator(client: resolvedClient)
-        self.btwStreamClient = btwStreamClient ?? SSEClient()
         self.liveActivityManager = resolvedLiveActivityManager
         self.showsLiveActivityResponseExcerpts = showsLiveActivityResponseExcerpts
         self.pollingIntervals = pollingIntervals
@@ -498,11 +318,7 @@ final class ChatViewModel {
         self.streamingMaxRevealLagNanoseconds = streamingMaxRevealLagNanoseconds
         self.speechSynthesizerFactory = speechSynthesizerFactory
         self.listenAudioSession = listenAudioSession ?? ListenAudioSessionController()
-        self.listenRemoteControlCenter = listenRemoteControlCenter ?? ListenRemoteControlController()
         self.userDefaults = userDefaults
-        self.listenPlaybackSpeed = ListenPlaybackSpeed.stored(in: userDefaults)
-        self.serverTTSAudioPlayerFactory = serverTTSAudioPlayerFactory
-            ?? { try ServerTTSAudioPlayer(data: $0) }
         displayTitle = Self.displayTitle(from: session.title)
         self.streamCoordinator.attach(delegate: self)
         self.pendingActionCoordinator.delegate = self
@@ -510,11 +326,8 @@ final class ChatViewModel {
     }
 
     deinit {
-        backgroundPollTask?.cancel()
         pendingStreamingScrollTriggerTask?.cancel()
         pendingStreamingContentFlushTask?.cancel()
-        listenPreparationTask?.cancel()
-        listenPlaybackTicker?.invalidate()
     }
 
     func setShowsLiveActivityResponseExcerpts(_ shows: Bool) {
@@ -522,14 +335,6 @@ final class ChatViewModel {
 
         showsLiveActivityResponseExcerpts = shows
         streamCoordinator.setShowsLiveActivityResponseExcerpts(shows)
-    }
-
-    var showsListenPlaybackBar: Bool {
-        listenPlaybackPhase != .idle
-    }
-
-    var listenPlaybackDisplayTime: TimeInterval {
-        listenPlaybackScrubTime ?? listenPlaybackElapsedTime
     }
 
     nonisolated static func resetActiveStreamSnapshotsForTesting() {
@@ -2007,17 +1812,20 @@ final class ChatViewModel {
         lastError = nil
         defer { isSendingVoiceNote = false }
 
-        // 1. Transcribe via server STT. Any error or empty transcript aborts the
-        //    whole send — no fallback, no partial message (per the issue).
+        // 1. Transcribe via on-device speech recognition. The native dashboard
+        //    has no server transcription endpoint, so the audio clip is
+        //    recognized locally. Any error or empty transcript aborts the whole
+        //    send — no fallback, no partial message (per the issue).
         let transcript: String
         do {
-            let response = try await client.transcribeAudio(data: audioData, filename: filename)
-            if let serverError = response.error?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !serverError.isEmpty {
-                setUploadAttachmentError(serverError)
+            guard let audioURL = writeVoiceNoteToTempFile(audioData, filename: filename) else {
+                setUploadAttachmentError(String(localized: "Couldn't save that voice note."))
                 return false
             }
-            let text = (response.transcript ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            defer { try? FileManager.default.removeItem(at: audioURL) }
+
+            let text = try await Self.transcribeOnDevice(audioURL)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else {
                 setUploadAttachmentError(String(localized: "Couldn't transcribe that voice note. Try recording again."))
                 return false
@@ -2065,6 +1873,59 @@ final class ChatViewModel {
             attachmentsToRestoreOnFailure: [],
             modelContext: modelContext
         )
+    }
+
+    /// Writes in-memory voice-note audio to a temp file so on-device speech
+    /// recognition can read it. Returns nil on failure.
+    private func writeVoiceNoteToTempFile(_ data: Data, filename: String) -> URL? {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hermex-voice-note-\(UUID().uuidString)")
+            .appendingPathExtension((filename as NSString).pathExtension.isEmpty ? "wav" : (filename as NSString).pathExtension)
+        do {
+            try data.write(to: url)
+            return url
+        } catch {
+            return nil
+        }
+    }
+
+    /// Recognizes a recorded audio file on-device. The native dashboard has no
+    /// server transcription endpoint, so this is the device-local replacement.
+    nonisolated private static func transcribeOnDevice(_ audioURL: URL) async throws -> String {
+        guard let recognizer = SFSpeechRecognizer() else {
+            struct Unavailable: LocalizedError {
+                var errorDescription: String? { "On-device speech recognition is unavailable." }
+            }
+            throw Unavailable()
+        }
+        let box = SpeechRecognitionBox()
+        return try await withCheckedThrowingContinuation { continuation in
+            let request = SFSpeechURLRecognitionRequest(url: audioURL)
+            request.requiresOnDeviceRecognition = true
+            request.shouldReportPartialResults = false
+            recognizer.recognitionTask(with: request) { result, error in
+                guard !box.didResume else { return }
+                box.didResume = true
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                guard let result, result.isFinal else {
+                    box.didResume = false
+                    return
+                }
+                continuation.resume(returning: result.bestTranscription.formattedString)
+            }
+        }
+    }
+
+    private final class SpeechRecognitionBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _didResume = false
+        var didResume: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return _didResume }
+            set { lock.lock(); defer { lock.unlock() }; _didResume = newValue }
+        }
     }
 
     /// Shared optimistic-append + `startChat` + rollback core used by both the
@@ -2155,103 +2016,6 @@ final class ChatViewModel {
             restorePendingAttachments(attachmentsToRestoreOnFailure)
             return false
         }
-    }
-
-    func submitGoal(args rawArgs: String, modelContext: ModelContext? = nil) async -> Bool {
-        guard !isViewingCachedData else {
-            goalErrorMessage = String(localized: "Reconnect to the server to manage goals.")
-            sendErrorMessage = goalErrorMessage
-            return false
-        }
-
-        let args = rawArgs.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !args.isEmpty else { return false }
-
-        guard let sessionID else {
-            goalErrorMessage = String(localized: "The server did not provide a session ID.")
-            sendErrorMessage = goalErrorMessage
-            return false
-        }
-
-        guard activeStreamID == nil else {
-            goalErrorMessage = String(localized: "Wait for the current response to finish before changing goals.")
-            sendErrorMessage = goalErrorMessage
-            return false
-        }
-
-        isSubmittingGoal = true
-        goalErrorMessage = nil
-        sendErrorMessage = nil
-        lastError = nil
-        defer { isSubmittingGoal = false }
-
-        do {
-            let response = try await client.submitGoal(
-                sessionID: sessionID,
-                args: args,
-                workspace: currentWorkspace,
-                model: currentModel,
-                modelProvider: requestModelProvider,
-                profile: requestProfileName
-            )
-
-            currentGoal = response.goal
-
-            if response.ok == false || response.action?.lowercased() == "error" {
-                goalErrorMessage = response.displayMessage ?? String(localized: "Goal request failed.")
-                sendErrorMessage = goalErrorMessage
-                return false
-            }
-
-            hasActivatedGoalCommand = true
-
-            guard response.kickoffPromptText != nil else {
-                if let message = response.displayMessage {
-                    appendLocalNoticeMessage(message)
-                }
-                return true
-            }
-
-            return await attachGoalKickoffStream(
-                noticeMessage: response.displayMessage,
-                modelContext: modelContext
-            )
-        } catch {
-            lastError = error
-            goalErrorMessage = error.localizedDescription
-            sendErrorMessage = goalErrorMessage
-            return false
-        }
-    }
-
-    private func attachGoalKickoffStream(noticeMessage: String?, modelContext: ModelContext?) async -> Bool {
-        await loadMessages(modelContext: modelContext)
-
-        if let errorMessage {
-            goalErrorMessage = errorMessage
-            sendErrorMessage = errorMessage
-            return false
-        }
-
-        guard let streamID = activeStreamID else {
-            if let noticeMessage {
-                appendLocalNoticeMessage(noticeMessage)
-            }
-            return true
-        }
-
-        if streamingAssistantMessageID == nil {
-            restoreActiveStreamSnapshotIfAvailable(streamID: streamID)
-        }
-        if streamingAssistantMessageID == nil {
-            streamingAssistantMessageID = Self.latestAssistantMessageID(in: messages)
-        }
-        if let noticeMessage {
-            pinLocalNoticeMessage(noticeMessage)
-        }
-
-        await streamCoordinator.start(streamID: streamID)
-        return true
     }
 
     private func rollbackOptimisticMessage(id: String) {
@@ -2352,12 +2116,6 @@ final class ChatViewModel {
             return await interruptResponseFromSlashCommand(args)
         case .status:
             return .executed(message: statusMessageFromSlashCommand())
-        case .btw:
-            return await askBtwFromSlashCommand(args)
-        case .background:
-            return await startBackgroundFromSlashCommand(args)
-        case .goal:
-            return await submitGoalFromSlashCommand(args)
         }
     }
 
@@ -2443,7 +2201,6 @@ final class ChatViewModel {
     private func statusMessageFromSlashCommand() -> String {
         let running = activeStreamID == nil ? String(localized: "No") : String(localized: "Yes")
         let queued = queuedSlashMessages.count
-        let backgroundTasks = backgroundPromptsByTaskID.count
         let profile = selectedProfileName ?? currentProfile ?? "default"
         let workspace = currentWorkspace ?? String(localized: "Unknown")
         let model = currentModel ?? String(localized: "Unknown")
@@ -2462,97 +2219,9 @@ final class ChatViewModel {
         - Workspace: \(workspace)
         - Agent running: \(running)
         - Queued messages: \(queued)
-        - Background tasks: \(backgroundTasks)
         - Messages loaded: \(messageCount)
         - Tokens: \(tokens)
         """)
-    }
-
-    private func askBtwFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        let question = args.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !question.isEmpty else {
-            return .unsupported(friendlyMessage: String(localized: "Usage: /btw <question>"))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        guard !isViewingCachedData else {
-            return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to ask a side question."))
-        }
-
-        guard !isCLISession else {
-            return .unsupported(friendlyMessage: String(localized: "/btw is available for WebUI sessions only."))
-        }
-
-        guard activeStreamID == nil else {
-            return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before using /btw."))
-        }
-
-        guard activeBtwStreamID == nil else {
-            return .unsupported(friendlyMessage: String(localized: "Wait for the current /btw answer to finish first."))
-        }
-
-        do {
-            let response = try await client.startBtw(sessionID: sessionID, question: question)
-            if let error = response.error, !error.isEmpty {
-                return .unsupported(friendlyMessage: error)
-            }
-
-            guard let streamID = response.streamId, !streamID.isEmpty else {
-                return .unsupported(friendlyMessage: String(localized: "The server did not return a /btw stream."))
-            }
-
-            startBtwStream(streamID: streamID, question: question)
-            return .executed(message: nil)
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
-    }
-
-    private func startBackgroundFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        let prompt = args.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty else {
-            return .unsupported(friendlyMessage: String(localized: "Usage: /background <prompt>"))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        guard !isViewingCachedData else {
-            return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to start a background task."))
-        }
-
-        guard !isCLISession else {
-            return .unsupported(friendlyMessage: String(localized: "/background is available for WebUI sessions only."))
-        }
-
-        do {
-            let response = try await client.startBackground(sessionID: sessionID, prompt: prompt)
-            if let error = response.error, !error.isEmpty {
-                return .unsupported(friendlyMessage: error)
-            }
-
-            guard let taskID = response.taskId, !taskID.isEmpty else {
-                return .unsupported(friendlyMessage: String(localized: "The server did not return a background task."))
-            }
-
-            backgroundPromptsByTaskID[taskID] = prompt
-            startBackgroundPollingIfNeeded(parentSessionID: sessionID)
-            return .executed(message: String(localized: "Background task started. I'll add the result here when it completes."))
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
-    }
-
-    private func submitGoalFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        let goalArgs = args.trimmingCharacters(in: .whitespacesAndNewlines)
-        let didSubmit = await submitGoal(args: goalArgs.isEmpty ? "status" : goalArgs)
-        return didSubmit ? .executed(message: nil) : .unsupported(friendlyMessage: goalErrorMessage ?? String(localized: "Could not submit the goal command."))
     }
 
     private func switchModelFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
@@ -3526,125 +3195,24 @@ final class ChatViewModel {
             return
         }
 
-        // Tapping the message that is already listening — fetching server audio or
-        // playing on either engine — toggles it off. Matching on `listeningMessageID`
-        // alone (not `isSpeaking`) also debounces rapid double-taps: the second tap
-        // stops cleanly instead of firing a second `/api/tts` call into the server's
-        // ~2 s rate limit or stacking audio (#15).
+        // Tapping the message that is already listening toggles it off. Matching
+        // on `listeningMessageID` alone (not `isSpeaking`) also debounces rapid
+        // double-taps: the second tap stops cleanly instead of stacking speech.
         if listeningMessageID == context.messageID {
             stopListening()
             return
         }
 
         stopListening()
-        // The audio session is NOT activated here: `/api/tts` can be slow or
-        // unreachable, and activating the non-mixable playback session before the
-        // fetch would silence other audio while Hermex has nothing to play (review
-        // on #35). Activation happens at the two playback-start points instead —
-        // `startServerAudioPlayback` and `speakWithOnDeviceSynthesizer`.
         listeningMessageID = context.messageID
-        beginListenPlaybackPreparation(for: context)
-
-        guard ServerTTSPolicy.shouldUseServerTTS(for: listenText) else {
-            // Over the server's 5000-char request cap: go straight to the on-device
-            // path (chunking is a non-goal of #15).
-            clearListenPlaybackState()
-            speakWithOnDeviceSynthesizer(listenText)
-            return
-        }
-
-        // Prefer the server's neural TTS; on any failure (offline, 4xx/5xx, rate
-        // limit, undecodable audio) fall back silently to the on-device
-        // synthesizer — no error alert (#15).
-        let requestID = UUID()
-        activeListenRequestID = requestID
-        listenPreparationTask = Task { [weak self, client] in
-            guard !Task.isCancelled else {
-                // Stopped before the fetch began (e.g. a rapid second tap): skip
-                // the request entirely instead of issuing one whose response
-                // would be dropped anyway.
-                return
-            }
-            let audioData: Data?
-            do {
-                audioData = try await client.synthesizeSpeech(
-                    text: listenText,
-                    voice: ServerTTSPolicy.defaultVoice
-                )
-            } catch {
-                audioData = nil
-            }
-
-            guard let self, !Task.isCancelled, self.activeListenRequestID == requestID else {
-                // Stopped or superseded while the fetch was in flight — the user no
-                // longer wants this audio; never start playback from a stale response.
-                return
-            }
-
-            if let audioData, self.startServerAudioPlayback(audioData, title: self.listenPlaybackTitle) {
-                return
-            }
-            self.clearListenPlaybackState()
-            self.speakWithOnDeviceSynthesizer(listenText)
-        }
+        speakWithOnDeviceSynthesizer(listenText)
     }
 
     func stopListening() {
-        // Cancel any in-flight server-TTS fetch so a late response can't start
-        // audio after the user asked to stop (or switched messages).
-        listenPreparationTask?.cancel()
-        listenPreparationTask = nil
-        activeListenRequestID = nil
-
-        // `AVAudioPlayer.stop()` does not fire the finish delegate, so no stale
-        // callback follows; state is torn down synchronously in `finishListening()`.
-        listenAudioPlayer?.stop()
-
         if let speechSynthesizer, speechSynthesizer.isSpeaking || speechSynthesizer.isPaused {
             speechSynthesizer.stopSpeaking(at: .immediate)
         }
         finishListening()
-    }
-
-    func toggleListenPlaybackPlayPause() {
-        switch listenPlaybackPhase {
-        case .playing:
-            pauseListenPlayback()
-        case .paused:
-            resumeListenPlayback()
-        case .idle, .loading:
-            break
-        }
-    }
-
-    func setListenPlaybackSpeed(_ speed: ListenPlaybackSpeed) {
-        guard listenPlaybackSpeed != speed else { return }
-        listenPlaybackSpeed = speed
-        userDefaults.set(speed.rawValue, forKey: ListenPlaybackSpeed.storageKey)
-        listenAudioPlayer?.rate = Float(speed.rawValue)
-        updateListenNowPlaying()
-    }
-
-    func scrubListenPlayback(to time: TimeInterval) {
-        listenPlaybackScrubTime = boundedListenPlaybackTime(time)
-    }
-
-    func setListenPlaybackScrubbing(_ scrubbing: Bool) {
-        if scrubbing {
-            listenPlaybackScrubTime = listenPlaybackElapsedTime
-        } else if let target = listenPlaybackScrubTime {
-            seekListenPlayback(to: target)
-            listenPlaybackScrubTime = nil
-        }
-    }
-
-    func refreshListenPlaybackProgressAfterSceneActivation() {
-        guard listenPlaybackPhase == .playing || listenPlaybackPhase == .paused else { return }
-
-        updateListenPlaybackProgressFromPlayer()
-        if listenPlaybackPhase == .playing {
-            startListenPlaybackTicker()
-        }
     }
 
     func suspendStreamForBackground() {
@@ -3656,7 +3224,6 @@ final class ChatViewModel {
     }
 
     func cleanupPollingTasks() {
-        stopBackgroundPolling(clearTrackedPrompts: true)
         pendingActionCoordinator.stopMonitoring(clearPrompt: true)
     }
 
@@ -3790,132 +3357,6 @@ final class ChatViewModel {
 
     func applyClarificationUpdate(_ update: ClarificationPendingResponse, sessionID: String) {
         pendingActionCoordinator.applyClarificationUpdate(update, sessionID: sessionID)
-    }
-
-    private func startBtwStream(streamID: String, question: String) {
-        activeBtwStreamID = streamID
-        activeBtwQuestion = question
-        activeBtwAnswer = ""
-        activeBtwMessageID = appendLocalAssistantMessage(Self.btwMessageText(question: question, answer: nil, isLoading: true))
-
-        btwStreamClient.start(url: client.chatStreamURL(streamID: streamID)) { [weak self] event in
-            self?.handleBtwStreamEvent(event)
-        }
-    }
-
-    private func handleBtwStreamEvent(_ event: SSEEvent) {
-        switch event {
-        case .token(let text):
-            activeBtwAnswer += text
-            updateActiveBtwMessage(isLoading: true)
-        case .interimAssistant(let payload):
-            guard payload.alreadyStreamed != true else { break }
-            let text = payload.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !text.isEmpty else { break }
-            if activeBtwAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                activeBtwAnswer = text
-            } else {
-                activeBtwAnswer += "\n\n\(text)"
-            }
-            updateActiveBtwMessage(isLoading: true)
-        case .done:
-            updateActiveBtwMessage(isLoading: false)
-        case .approvalPending, .clarificationPending:
-            break
-        case .streamEnd, .cancelled:
-            finishBtwStream()
-        case .error(let message):
-            activeBtwAnswer = "Error: \(message)"
-            updateActiveBtwMessage(isLoading: false)
-            finishBtwStream()
-        case .transportError(let message):
-            activeBtwAnswer = "Error: \(message)"
-            updateActiveBtwMessage(isLoading: false)
-            finishBtwStream()
-        case .heartbeat, .ignored, .reasoning, .toolStarted, .toolCompleted, .title, .metering, .pendingSteerLeftover:
-            break
-        }
-    }
-
-    private func updateActiveBtwMessage(isLoading: Bool) {
-        guard let activeBtwMessageID, let activeBtwQuestion else { return }
-        updateLocalMessage(
-            id: activeBtwMessageID,
-            content: Self.btwMessageText(
-                question: activeBtwQuestion,
-                answer: activeBtwAnswer,
-                isLoading: isLoading
-            )
-        )
-    }
-
-    private func finishBtwStream() {
-        btwStreamClient.stop()
-        activeBtwStreamID = nil
-        activeBtwMessageID = nil
-        activeBtwQuestion = nil
-        activeBtwAnswer = ""
-    }
-
-    private func stopBackgroundPolling(clearTrackedPrompts: Bool) {
-        backgroundPollTask?.cancel()
-        backgroundPollTask = nil
-        if clearTrackedPrompts {
-            backgroundPromptsByTaskID.removeAll()
-        }
-    }
-
-    private func startBackgroundPollingIfNeeded(parentSessionID: String) {
-        guard backgroundPollTask == nil else { return }
-
-        let pollingInterval = pollingIntervals.backgroundNanoseconds
-        backgroundPollTask = Task { @MainActor [weak self] in
-            pollingLoop: while !Task.isCancelled {
-                do {
-                    guard let self,
-                          !self.backgroundPromptsByTaskID.isEmpty
-                    else { break pollingLoop }
-
-                    do {
-                        let response = try await self.client.backgroundStatus(sessionID: parentSessionID)
-                        self.handleBackgroundResults(response.results ?? [])
-                    } catch {
-                        self.lastError = error
-                    }
-
-                    guard !Task.isCancelled, !self.backgroundPromptsByTaskID.isEmpty else {
-                        break pollingLoop
-                    }
-                }
-
-                try? await Task.sleep(nanoseconds: pollingInterval)
-            }
-
-            if !Task.isCancelled {
-                self?.backgroundPollTask = nil
-            }
-        }
-    }
-
-    private func handleBackgroundResults(_ results: [BackgroundResult]) {
-        for result in results {
-            let prompt: String
-            if let taskID = result.taskId,
-               let trackedPrompt = backgroundPromptsByTaskID.removeValue(forKey: taskID) {
-                prompt = trackedPrompt
-            } else if let resultPrompt = result.prompt, !resultPrompt.isEmpty {
-                prompt = resultPrompt
-            } else {
-                prompt = "Background task"
-            }
-
-            appendLocalAssistantMessage(
-                Self.backgroundResultText(
-                    prompt: prompt,
-                    answer: result.answer
-                )
-            )
-        }
     }
 
     @discardableResult
@@ -4547,170 +3988,22 @@ final class ChatViewModel {
 
     private func finishListening() {
         activeListeningUtteranceID = nil
-        activeListenPlayerID = nil
-        activeListenRequestID = nil
-        listenAudioPlayer = nil
         listeningMessageID = nil
-        clearListenPlaybackState()
         // Release the shared session so any audio we interrupted can resume. Safe to
         // call when nothing was speaking: `setActive(false)` no-ops via `try?`.
         listenAudioSession.deactivate()
     }
 
-    private func beginListenPlaybackPreparation(for context: MessageActionContext) {
-        listenPlaybackTitle = String(localized: "Hermex response \(context.visibleIndex + 1)")
-        listenPlaybackPhase = .loading
-        listenPlaybackElapsedTime = 0
-        listenPlaybackDuration = 0
-        listenPlaybackScrubTime = nil
-        stopListenPlaybackTicker()
-        listenRemoteControlCenter.clear()
-    }
-
-    private func clearListenPlaybackState() {
-        listenPlaybackPhase = .idle
-        listenPlaybackElapsedTime = 0
-        listenPlaybackDuration = 0
-        listenPlaybackScrubTime = nil
-        stopListenPlaybackTicker()
-        listenRemoteControlCenter.clear()
-    }
-
-    /// Speaks `text` with the on-device `AVSpeechSynthesizer` — the pre-#15 Listen
-    /// path, kept as the offline/failure fallback for server TTS.
+    /// Speaks `text` with the on-device `AVSpeechSynthesizer`. The audio session is
+    /// activated immediately before speech starts and released in `finishListening()`
+    /// once playback ends. See #252.
     private func speakWithOnDeviceSynthesizer(_ text: String) {
-        // Route speech to the speaker (not the receiver/earpiece) immediately before
-        // speech starts — not when the Listen tap lands — so a slow `/api/tts` fetch
-        // never interrupts other audio while Hermex is silent (review on #35).
-        // Released again in `finishListening()` once playback ends. See #252.
         listenAudioSession.activate()
         let speechSynthesizer = speechSynthesizerForListening()
         let utterance = AVSpeechUtterance(string: text)
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate
         activeListeningUtteranceID = ObjectIdentifier(utterance)
         speechSynthesizer.speak(utterance)
-    }
-
-    /// Attempts to start playback of server-synthesized audio bytes. Returns
-    /// `false` when the bytes can't be decoded into a player or playback fails to
-    /// start, so the caller can fall back to the on-device synthesizer.
-    private func startServerAudioPlayback(_ audioData: Data, title: String) -> Bool {
-        guard let player = try? serverTTSAudioPlayerFactory(audioData) else {
-            return false
-        }
-
-        let playerID = ObjectIdentifier(player)
-        player.onFinish = { [weak self] in
-            self?.handleListenPlayerCompletion(for: playerID)
-        }
-        player.prepareToPlay()
-        player.rate = Float(listenPlaybackSpeed.rawValue)
-        listenPlaybackTitle = title
-        listenPlaybackElapsedTime = player.currentTime
-        listenPlaybackDuration = player.duration
-        listenPlaybackScrubTime = nil
-        configureListenRemoteControls()
-
-        // Activate the session only once decodable audio is in hand, immediately
-        // before playback, so the network wait never held it (review on #35). If
-        // `play()` still fails, the on-device fallback re-activates for itself —
-        // `activate()` is idempotent, and `finishListening()` releases it either way.
-        listenAudioSession.activate()
-        guard player.play() else {
-            return false
-        }
-
-        listenAudioPlayer = player
-        activeListenPlayerID = playerID
-        listenPlaybackPhase = .playing
-        startListenPlaybackTicker()
-        updateListenPlaybackProgressFromPlayer()
-        updateListenNowPlaying()
-        return true
-    }
-
-    private func pauseListenPlayback() {
-        guard listenPlaybackPhase == .playing, let player = listenAudioPlayer else { return }
-        player.pause()
-        updateListenPlaybackProgressFromPlayer()
-        listenPlaybackPhase = .paused
-        stopListenPlaybackTicker()
-        updateListenNowPlaying()
-    }
-
-    private func resumeListenPlayback() {
-        guard listenPlaybackPhase == .paused, let player = listenAudioPlayer else { return }
-        player.rate = Float(listenPlaybackSpeed.rawValue)
-        listenAudioSession.activate()
-        guard player.play() else { return }
-        listenPlaybackPhase = .playing
-        startListenPlaybackTicker()
-        updateListenPlaybackProgressFromPlayer()
-        updateListenNowPlaying()
-    }
-
-    private func seekListenPlayback(to time: TimeInterval) {
-        guard let player = listenAudioPlayer else { return }
-        let boundedTime = boundedListenPlaybackTime(time)
-        player.currentTime = boundedTime
-        listenPlaybackElapsedTime = boundedTime
-        updateListenNowPlaying()
-    }
-
-    private func boundedListenPlaybackTime(_ time: TimeInterval) -> TimeInterval {
-        guard time.isFinite else { return 0 }
-        let upperBound = listenPlaybackDuration > 0 ? listenPlaybackDuration : max(time, 0)
-        return min(max(0, time), upperBound)
-    }
-
-    private func startListenPlaybackTicker() {
-        stopListenPlaybackTicker()
-        let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.updateListenPlaybackProgressFromPlayer()
-            }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        listenPlaybackTicker = timer
-    }
-
-    private func stopListenPlaybackTicker() {
-        listenPlaybackTicker?.invalidate()
-        listenPlaybackTicker = nil
-    }
-
-    private func updateListenPlaybackProgressFromPlayer() {
-        guard listenPlaybackScrubTime == nil, let player = listenAudioPlayer else { return }
-        listenPlaybackElapsedTime = boundedListenPlaybackTime(player.currentTime)
-        listenPlaybackDuration = max(0, player.duration)
-    }
-
-    private func configureListenRemoteControls() {
-        listenRemoteControlCenter.configure(
-            play: { [weak self] in self?.resumeListenPlayback() },
-            pause: { [weak self] in self?.pauseListenPlayback() },
-            togglePlayPause: { [weak self] in self?.toggleListenPlaybackPlayPause() },
-            changePlaybackPosition: { [weak self] position in self?.seekListenPlayback(to: position) }
-        )
-    }
-
-    private func updateListenNowPlaying() {
-        guard listenPlaybackPhase == .playing || listenPlaybackPhase == .paused else { return }
-        listenRemoteControlCenter.update(ListenNowPlayingSnapshot(
-            title: listenPlaybackTitle,
-            duration: listenPlaybackDuration,
-            elapsedTime: listenPlaybackElapsedTime,
-            speed: listenPlaybackSpeed,
-            isPlaying: listenPlaybackPhase == .playing
-        ))
-    }
-
-    /// Completion routed from the server-TTS audio player. Mirrors
-    /// `handleListenCompletion(for:)`: a stale callback from a superseded player
-    /// must not clear the new listen state or deactivate the session.
-    private func handleListenPlayerCompletion(for playerID: ObjectIdentifier) {
-        guard playerID == activeListenPlayerID else { return }
-        finishListening()
     }
 
     /// Completion routed from the speech-synthesizer delegate. Switching messages mid-
@@ -4794,34 +4087,6 @@ final class ChatViewModel {
     private static let reasoningEffortArgs: Set<String> = ["none", "minimal", "low", "medium", "high", "xhigh"]
     private static let personalityClearArgs: Set<String> = ["none", "default", "clear"]
 
-    private static func btwMessageText(question: String, answer: String?, isLoading: Bool) -> String {
-        let trimmedAnswer = answer?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let body: String
-        if trimmedAnswer.isEmpty {
-            body = isLoading ? "..." : String(localized: "No answer produced.")
-        } else {
-            body = trimmedAnswer
-        }
-
-        return """
-        **BTW** \(question)
-
-        \(body)
-        """
-    }
-
-    private static func backgroundResultText(prompt: String, answer: String?) -> String {
-        let trimmedAnswer = answer?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let body = trimmedAnswer.isEmpty ? String(localized: "No answer produced.") : trimmedAnswer
-        let summary = prompt.count > 80 ? "\(prompt.prefix(80))..." : prompt
-
-        return """
-        **Background** \(summary)
-
-        \(body)
-        """
-    }
-
     private static let slashCommandHelpText = String(localized: """
     Available mobile commands:
 
@@ -4839,9 +4104,6 @@ final class ChatViewModel {
     `/steer <message>` - Steer the active response.
     `/interrupt <message>` - Stop the active response and send a new message.
     `/status` - Show session status.
-    `/btw <question>` - Ask a side question without changing this chat.
-    `/background <prompt>` - Run a parallel task and post the result here.
-    `/bg <prompt>` - Alias for `/background`.
     `/branch [name]` - Fork this conversation.
     `/fork [name]` - Alias for `/branch`.
     `/compress [focus]` - Compress this session's context.
@@ -5577,110 +4839,13 @@ struct SpeechTextNormalizer {
             }
 
         let normalized = lines
+            .map { line in
+                line.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            .filter { !$0.isEmpty }
             .joined(separator: "\n")
-            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         return normalized.isEmpty ? nil : normalized
-    }
-}
-
-/// Routing policy for the "Listen" action (#15): prefer the server's neural TTS
-/// (`POST /api/tts`, edge engine — no API key needed) and fall back to the
-/// on-device synthesizer when the server can't serve the request.
-enum ServerTTSPolicy {
-    /// Server-enforced request cap (`400 text too long` above it); longer text
-    /// routes straight to the on-device synthesizer (chunking is a non-goal).
-    static let maximumTextLength = 5000
-    /// The server's own default voice is `zh-CN-XiaoxiaoNeural`, so the client
-    /// must always send an explicit voice. A voice picker is a non-goal of #15;
-    /// this is the issue-specified default (verified live 2026-07-02).
-    static let defaultVoice = "en-US-AriaNeural"
-
-    static func shouldUseServerTTS(for text: String) -> Bool {
-        text.count <= maximumTextLength
-    }
-}
-
-/// Playback seam for server-synthesized "Listen" audio. Injectable so tests can
-/// drive playback outcomes without constructing a real `AVAudioPlayer` (which
-/// requires decodable audio bytes).
-@MainActor
-protocol ListenAudioPlaying: AnyObject {
-    /// Fired on the main actor when playback finishes naturally.
-    /// `stop()` must not fire it.
-    var onFinish: (@MainActor () -> Void)? { get set }
-    var currentTime: TimeInterval { get set }
-    var duration: TimeInterval { get }
-    var rate: Float { get set }
-
-    func prepareToPlay()
-    @discardableResult
-    func play() -> Bool
-    func pause()
-    func stop()
-}
-
-/// Production `ListenAudioPlaying`: wraps `AVAudioPlayer` and forwards its finish
-/// delegate onto the main actor. `init` throws when the bytes aren't decodable
-/// audio, which the caller treats as "fall back to the on-device synthesizer".
-@MainActor
-final class ServerTTSAudioPlayer: NSObject, ListenAudioPlaying {
-    private let player: AVAudioPlayer
-    var onFinish: (@MainActor () -> Void)?
-    var currentTime: TimeInterval {
-        get { player.currentTime }
-        set { player.currentTime = newValue }
-    }
-    var duration: TimeInterval { player.duration }
-    var rate: Float {
-        get { player.rate }
-        set { player.rate = newValue }
-    }
-
-    init(data: Data) throws {
-        player = try AVAudioPlayer(data: data)
-        super.init()
-        player.delegate = self
-        player.enableRate = true
-    }
-
-    func prepareToPlay() {
-        player.prepareToPlay()
-    }
-
-    @discardableResult
-    func play() -> Bool {
-        player.play()
-    }
-
-    func pause() {
-        player.pause()
-    }
-
-    func stop() {
-        player.stop()
-    }
-}
-
-extension ServerTTSAudioPlayer: AVAudioPlayerDelegate {
-    // `AVAudioPlayer` may call its delegate off the main thread; hop back before
-    // touching main-actor listen state. Finished-with-error still ends playback,
-    // so both flag values route to `onFinish`.
-    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        Task { @MainActor in
-            self.onFinish?()
-        }
-    }
-
-    // A mid-playback decode error fires this callback instead of (or as well as)
-    // the finish one — without it the listen state would stay stuck "listening"
-    // forever. Route it to `onFinish` too; a double fire is harmless because the
-    // completion handler drops callbacks from a no-longer-active player.
-    nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
-        Task { @MainActor in
-            self.onFinish?()
-        }
     }
 }
 

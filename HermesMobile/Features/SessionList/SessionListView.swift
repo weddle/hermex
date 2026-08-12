@@ -49,10 +49,8 @@ struct SessionListView: View {
     @AppStorage(SessionRowDisplaySettings.showSubagentSessionsKey)
     private var showsSubagentSessions = SessionRowDisplaySettings.defaultShowsSubagentSessions
     @AppStorage(SectionVisibilitySettings.tasksKey) private var showsTasksSection = true
-    @AppStorage(SectionVisibilitySettings.kanbanKey) private var showsKanbanSection = true
     @AppStorage(SectionVisibilitySettings.skillsKey) private var showsSkillsSection = true
     @AppStorage(SectionVisibilitySettings.memoryKey) private var showsMemorySection = true
-    @AppStorage(SectionVisibilitySettings.insightsKey) private var showsInsightsSection = true
     @AppStorage(SectionVisibilitySettings.activeProfileKey) private var showsActiveProfileSection = true
     @AppStorage(SectionVisibilitySettings.projectsKey) private var showsProjectsSection = true
     // Per-server key (#19): the CLI toggle mirrors the active server's
@@ -361,14 +359,10 @@ struct SessionListView: View {
                 SettingsView(authManager: authManager, server: server, initialScrollTarget: scrollTo)
             case .tasks:
                 TasksView(server: server, onAPIError: authManager.handleAPIError)
-            case .kanban:
-                KanbanView(server: server, onAPIError: authManager.handleAPIError)
             case .skills:
                 SkillsView(server: server, onAPIError: authManager.handleAPIError)
             case .memory:
                 MemoryView(server: server, onAPIError: authManager.handleAPIError)
-            case .insights:
-                InsightsView(server: server, onAPIError: authManager.handleAPIError)
             case .archived:
                 ArchivedSessionsView(server: server, onAPIError: authManager.handleAPIError)
             case .scheduled:
@@ -702,10 +696,8 @@ struct SessionListView: View {
     private var sidebarSectionVisibility: SidebarSectionVisibility {
         SidebarSectionVisibility(
             tasks: showsTasksSection,
-            kanban: showsKanbanSection,
             skills: showsSkillsSection,
             memory: showsMemorySection,
-            insights: showsInsightsSection,
             activeProfile: showsActiveProfileSection,
             projects: showsProjectsSection
         )
@@ -1353,10 +1345,8 @@ enum SessionListUtilityDestination: Hashable, Identifiable {
     /// passes `.servers`, a plain avatar tap passes `nil` (#283).
     case settings(SettingsScrollAnchor?)
     case tasks
-    case kanban
     case skills
     case memory
-    case insights
     /// Archived sessions screen (issue #17), also reachable from Settings.
     case archived
     case scheduled
