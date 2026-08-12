@@ -50,18 +50,11 @@ final class SlashCommandTests: XCTestCase {
         XCTAssertEqual(alias?.argHint, "name")
     }
 
-    func testUndoCommandIsMobileSafeAdvancedCommand() {
-        let command = SlashCommandCatalog.command(named: "undo")
-        XCTAssertEqual(command?.name, "undo")
-        XCTAssertEqual(command?.handler, .serverSide(.undo))
-        XCTAssertEqual(command?.noEcho, true)
-    }
-
-    func testRetryCommandIsMobileSafeAdvancedCommand() {
-        let command = SlashCommandCatalog.command(named: "retry")
-        XCTAssertEqual(command?.name, "retry")
-        XCTAssertEqual(command?.handler, .serverSide(.retry))
-        XCTAssertEqual(command?.noEcho, true)
+    func testUndoAndRetryAreNotRegisteredAfterWebUIControlRemoval() {
+        // Undo/retry were WebUI-only controls with no direct native dashboard
+        // equivalent; they must not appear in the slash surface.
+        XCTAssertNil(SlashCommandCatalog.command(named: "undo"))
+        XCTAssertNil(SlashCommandCatalog.command(named: "retry"))
     }
 
     func testCompressCommandIsMobileSafeAdvancedCommand() {
@@ -108,44 +101,27 @@ final class SlashCommandTests: XCTestCase {
         XCTAssertNil(status?.argHint)
     }
 
-    func testGoalCommandIsMobileSafePersistentGoalCommand() {
-        let command = SlashCommandCatalog.command(named: "goal")
-        XCTAssertEqual(command?.name, "goal")
-        XCTAssertEqual(command?.handler, .serverSide(.goal))
-        XCTAssertEqual(command?.noEcho, true)
-        XCTAssertEqual(command?.argHint, "[status|pause|resume|clear|text]")
-        XCTAssertEqual(command?.subArgs, .goalActions)
-        XCTAssertEqual(SlashCommandCatalog.goalActions, ["status", "pause", "resume", "clear"])
+    func testGoalAndSideTaskCommandsAreAbsentAfterWebUIRemoval() {
+        // Goals and side tasks (btw/background/bg) were WebUI-only features with
+        // no native dashboard equivalent; they must not appear in the catalog.
+        XCTAssertNil(SlashCommandCatalog.command(named: "goal"))
+        XCTAssertNil(SlashCommandCatalog.command(named: "btw"))
+        XCTAssertNil(SlashCommandCatalog.command(named: "background"))
+        XCTAssertNil(SlashCommandCatalog.command(named: "bg"))
+        XCTAssertFalse(SlashCommandCatalog.allCommands.contains { $0.name == "goal" })
+        XCTAssertFalse(SlashCommandCatalog.allCommands.contains { $0.name == "btw" })
     }
 
-    func testSideTaskCommandsAreMobileSafeCommands() {
-        let btw = SlashCommandCatalog.command(named: "btw")
-        XCTAssertEqual(btw?.handler, .serverSide(.btw))
-        XCTAssertEqual(btw?.noEcho, true)
-        XCTAssertEqual(btw?.argHint, "question")
-
-        let background = SlashCommandCatalog.command(named: "background")
-        XCTAssertEqual(background?.handler, .serverSide(.background))
-        XCTAssertEqual(background?.noEcho, true)
-        XCTAssertEqual(background?.argHint, "prompt")
-
-        let alias = SlashCommandCatalog.command(named: "bg")
-        XCTAssertEqual(alias?.handler, .serverSide(.background))
-        XCTAssertEqual(alias?.noEcho, true)
-        XCTAssertEqual(alias?.argHint, "prompt")
-    }
-
-    func testMatchingFindsUnsupportedCommands() {
+    func testMatchingFindsRetainedCommands() {
         XCTAssertTrue(SlashCommandCatalog.matching("que").contains { $0.name == "queue" })
         XCTAssertTrue(SlashCommandCatalog.matching("ste").contains { $0.name == "steer" })
         XCTAssertTrue(SlashCommandCatalog.matching("int").contains { $0.name == "interrupt" })
         XCTAssertTrue(SlashCommandCatalog.matching("sta").contains { $0.name == "status" })
-        XCTAssertTrue(SlashCommandCatalog.matching("bt").contains { $0.name == "btw" })
-        XCTAssertTrue(SlashCommandCatalog.matching("back").contains { $0.name == "background" })
-        XCTAssertTrue(SlashCommandCatalog.matching("bg").contains { $0.name == "bg" })
         XCTAssertTrue(SlashCommandCatalog.matching("com").contains { $0.name == "compact" })
         XCTAssertTrue(SlashCommandCatalog.matching("for").contains { $0.name == "fork" })
-        XCTAssertTrue(SlashCommandCatalog.matching("goa").contains { $0.name == "goal" })
+        XCTAssertTrue(SlashCommandCatalog.matching("ski").contains { $0.name == "skills" })
+        XCTAssertTrue(SlashCommandCatalog.matching("mod").contains { $0.name == "model" })
+        XCTAssertTrue(SlashCommandCatalog.matching("wor").contains { $0.name == "workspace" })
     }
 
     func testCommandNamedIsCaseInsensitive() {
@@ -221,11 +197,11 @@ final class SlashCommandTests: XCTestCase {
         XCTAssertEqual(parsed.command?.name, "model")
     }
 
-    func testParsedQueryTreatsGoalActionsAsSubArgs() {
-        let parsed = ParsedSlashQuery(query: "/goal sta")
-        XCTAssertEqual(parsed.command?.name, "goal")
-        XCTAssertEqual(parsed.command?.subArgs, .goalActions)
-        XCTAssertEqual(parsed.argQuery, "sta")
+    func testParsedQueryTreatsReasoningLevelsAsSubArgs() {
+        let parsed = ParsedSlashQuery(query: "/reasoning med")
+        XCTAssertEqual(parsed.command?.name, "reasoning")
+        XCTAssertEqual(parsed.command?.subArgs, .reasoningLevels)
+        XCTAssertEqual(parsed.argQuery, "med")
         XCTAssertTrue(parsed.isSubArgMode)
     }
 
@@ -328,45 +304,31 @@ final class SlashCommandTests: XCTestCase {
         XCTAssertTrue(message.contains("Send `/spotify <message>` to use this skill."))
     }
 
-    // MARK: - Agent slash suggestions
+    // MARK: - Skill slash surface (native-dashboard skills list)
 
-    func testAgentCommandSuggestionsIncludeNonCLICommands() {
-        let suggestions = AgentSlashCommandSuggestion.matching("res", in: [
-            AgentCommand(
-                name: "resume",
-                description: "Resume a previously-named session",
-                argsHint: "name",
-                cliOnly: false,
-                gatewayOnly: false
-            )
+    func testSkillSuggestionsMatchAcrossNameCategoryAndDescription() {
+        let suggestions = SlashSkillFormatter.suggestions(from: [
+            SkillSummary(name: "resume", category: "sessions", description: "Resume a session", path: nil),
+            SkillSummary(name: "shell", category: "coding", description: "CLI", path: nil),
+            SkillSummary(name: "session", category: "sessions", description: nil, path: nil)
         ])
 
-        XCTAssertEqual(suggestions.map(\.name), ["resume"])
-        XCTAssertEqual(suggestions.first?.description, "Resume a previously-named session")
-        XCTAssertEqual(suggestions.first?.argHint, "name")
+        let resume = SlashSkillFormatter.matching("res", in: suggestions).map(\.name)
+        XCTAssertEqual(resume, ["resume"])
+        XCTAssertTrue(SlashSkillFormatter.matching("session", in: suggestions).map(\.name).contains("session"))
+        XCTAssertTrue(SlashSkillFormatter.matching("session", in: suggestions).map(\.name).contains("resume"))
     }
 
-    func testAgentCommandSuggestionsHideCLIOnlyGatewayOnlyAndDuplicateCommands() {
-        let suggestions = AgentSlashCommandSuggestion.matching("s", in: [
-            AgentCommand(name: "status", description: "Agent status"),
-            AgentCommand(name: "shell", description: "CLI only", cliOnly: true),
-            AgentCommand(name: "sethome", description: "Gateway only", gatewayOnly: true),
-            AgentCommand(name: "session", description: nil)
-        ], excluding: ["status"])
-
-        XCTAssertEqual(suggestions.map(\.name), ["session"])
-        XCTAssertEqual(suggestions.first?.description, "Agent command")
-    }
-
-    func testAgentCommandLookupRecognizesVisibleMetadataCommand() {
-        let commands = [
-            AgentCommand(name: "resume", description: "Resume a previously-named session"),
-            AgentCommand(name: "model", description: "Built-in model command"),
-            AgentCommand(name: "browser", description: "CLI only", cliOnly: true)
-        ]
-
-        XCTAssertEqual(AgentSlashCommandSuggestion.command(named: "RESUME", in: commands)?.name, "resume")
-        XCTAssertNil(AgentSlashCommandSuggestion.command(named: "model", in: commands))
-        XCTAssertNil(AgentSlashCommandSuggestion.command(named: "browser", in: commands))
+    func testSkillAllCommandsExposeRetainedSlashSurfaceOnly() {
+        let names = Set(SlashCommandCatalog.allCommands.map(\.name))
+        XCTAssertTrue(names.isSuperset(of: [
+            "model", "workspace", "reasoning", "title", "skills",
+            "compress", "branch", "queue", "steer", "interrupt", "status"
+        ]))
+        XCTAssertFalse(names.contains("btw"))
+        XCTAssertFalse(names.contains("background"))
+        XCTAssertFalse(names.contains("goal"))
+        XCTAssertFalse(names.contains("undo"))
+        XCTAssertFalse(names.contains("retry"))
     }
 }
