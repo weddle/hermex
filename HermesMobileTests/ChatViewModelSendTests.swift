@@ -136,10 +136,10 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertTrue(didStart)
         let gateway = try XCTUnwrap(fabricator.latest)
 
-        gateway.deliver(.reasoning(sessionID: "session-abc", text: "I need to inspect the workspace."))
+        gateway.deliver(GatewayEventFixture.reasoning(sessionID: "session-abc", text: "I need to inspect the workspace."))
         gateway.deliver(.toolStarted(sessionID: "session-abc", name: "read_file", input: .object(["path": .string("PROJECT_SPEC.md")])))
         gateway.deliver(.toolCompleted(sessionID: "session-abc", name: "read_file", output: .string("Read PROJECT_SPEC.md")))
-        gateway.deliver(.delta(sessionID: "session-abc", text: "First live token."))
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "First live token."))
         viewModel.flushPendingStreamingContent()
 
         XCTAssertEqual(viewModel.liveReasoningText, "I need to inspect the workspace.")
@@ -164,7 +164,7 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertTrue(didStart)
         let gateway = try XCTUnwrap(fabricator.latest)
 
-        gateway.deliver(.reasoning(sessionID: "session-abc", text: "I should inspect the workspace."))
+        gateway.deliver(GatewayEventFixture.reasoning(sessionID: "session-abc", text: "I should inspect the workspace."))
         // Reasoning chunks are flushed through the coalesced path; the anchor
         // is assigned at flush time.
         viewModel.flushPendingStreamingContent()
@@ -183,7 +183,7 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertEqual(viewModel.toolCallAnchorMessageID, liveAssistantID)
         XCTAssertEqual(viewModel.liveToolCalls.map(\.name), ["terminal"])
 
-        gateway.deliver(.delta(sessionID: "session-abc", text: "Live answer starts now."))
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "Live answer starts now."))
         viewModel.flushPendingStreamingContent()
 
         XCTAssertEqual(viewModel.messages.count, 2)
@@ -213,7 +213,7 @@ final class ChatViewModelSendTests: XCTestCase {
         let initialTrigger = viewModel.streamingScrollTrigger
 
         for index in 0..<20 {
-            gateway.deliver(.delta(sessionID: "session-abc", text: "token-\(index) "))
+            gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "token-\(index) "))
         }
         XCTAssertEqual(viewModel.streamingScrollTrigger, initialTrigger)
 
@@ -223,7 +223,7 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertEqual(viewModel.streamingScrollTrigger, initialTrigger + 1)
         XCTAssertTrue(viewModel.messages.last?.content?.hasPrefix("token-0 token-1") == true)
 
-        gateway.deliver(.reasoning(sessionID: "session-abc", text: "Check the next step."))
+        gateway.deliver(GatewayEventFixture.reasoning(sessionID: "session-abc", text: "Check the next step."))
         gateway.deliver(.toolStarted(sessionID: "session-abc", name: "read_file", input: .object(["path": .string("README.md")])))
         XCTAssertEqual(viewModel.streamingScrollTrigger, initialTrigger + 1)
         viewModel.flushPendingStreamingContent()
@@ -245,7 +245,7 @@ final class ChatViewModelSendTests: XCTestCase {
         let gateway = try XCTUnwrap(fabricator.latest)
 
         for index in 0..<25 {
-            gateway.deliver(.delta(sessionID: "session-abc", text: "chunk-\(index) "))
+            gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "chunk-\(index) "))
         }
 
         try await waitForStreamingContent(
@@ -281,12 +281,12 @@ final class ChatViewModelSendTests: XCTestCase {
         assertMemoMatchesPureMapping("memo should match after the optimistic append")
 
         let gateway = try XCTUnwrap(fabricator.latest)
-        gateway.deliver(.delta(sessionID: "session-abc", text: "first chunk "))
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "first chunk "))
         viewModel.flushPendingStreamingContent()
         XCTAssertTrue(viewModel.messages.last?.content?.contains("first chunk") == true)
         assertMemoMatchesPureMapping("memo should match after a streaming content edit")
 
-        gateway.deliver(.delta(sessionID: "session-abc", text: "second chunk "))
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "second chunk "))
         viewModel.flushPendingStreamingContent()
         assertMemoMatchesPureMapping("memo should match after a second content edit")
     }
@@ -303,7 +303,7 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertTrue(didStart)
         let gateway = try XCTUnwrap(fabricator.latest)
 
-        gateway.deliver(.delta(sessionID: "session-abc", text: "Inspecting repo structure."))
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "Inspecting repo structure."))
         viewModel.flushPendingStreamingContent()
 
         XCTAssertEqual(viewModel.messages.compactMap(\.role), ["user", "assistant"])
@@ -326,8 +326,8 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertTrue(didStart)
         let gateway = try XCTUnwrap(fabricator.latest)
 
-        gateway.deliver(.delta(sessionID: "session-abc", text: "Done with this."))
-        gateway.deliver(.complete(sessionID: "session-abc", content: "Done with this."))
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "Done with this."))
+        gateway.deliver(GatewayEventFixture.complete(sessionID: "session-abc", content: "Done with this."))
         // messageComplete's content append is buffered behind the word-cadence
         // flush; drain it deterministically.
         viewModel.flushPendingStreamingContent()
@@ -354,7 +354,7 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertTrue(didStart)
         let gateway = try XCTUnwrap(fabricator.latest)
 
-        gateway.deliver(.error(sessionID: "session-abc", message: "server failed"))
+        gateway.deliver(GatewayEventFixture.error(sessionID: "session-abc", message: "server failed"))
 
         XCTAssertNil(viewModel.activeStreamID)
         XCTAssertEqual(viewModel.sendErrorMessage, "server failed")
@@ -397,7 +397,7 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertTrue(didStart)
         let gateway = try XCTUnwrap(fabricator.latest)
 
-        gateway.deliver(.interrupted(sessionID: "session-abc"))
+        gateway.deliver(GatewayEventFixture.interrupted(sessionID: "session-abc"))
 
         XCTAssertNil(viewModel.activeStreamID)
         XCTAssertEqual(liveActivityManager.ends.last?.status, .cancelled)
@@ -515,7 +515,7 @@ final class ChatViewModelSendTests: XCTestCase {
         let firstGateway = try XCTUnwrap(fabricator.instances.first)
         XCTAssertEqual(fabricator.makeCount, 1)
 
-        firstGateway.deliver(.delta(sessionID: "session-abc", text: "Partial live answer."))
+        firstGateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "Partial live answer."))
         viewModel.flushPendingStreamingContent()
         XCTAssertEqual(viewModel.messages.compactMap(\.content), ["Keep working", "Partial live answer."])
 
@@ -549,7 +549,7 @@ final class ChatViewModelSendTests: XCTestCase {
         // The resume projection's in-flight assistant text becomes the visible
         // streaming message prefix once (streamingAssistantMessageID was nil at
         // resume time).
-        gateway.deliver(.delta(sessionID: "session-abc", text: "continuation."))
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "continuation."))
         viewModel.flushPendingStreamingContent()
 
         XCTAssertEqual(viewModel.messages.compactMap(\.content), ["Keep working", "Expected prefix continuation."])
@@ -572,7 +572,7 @@ final class ChatViewModelSendTests: XCTestCase {
 
         // Deliver a live delta from the FIRST epoch so it lands in the transcript,
         // then begin a second turn (new epoch) as a reconnect would.
-        firstGateway.deliver(.delta(sessionID: "session-abc", text: "First epoch partial."))
+        firstGateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "First epoch partial."))
         viewModel.flushPendingStreamingContent()
         XCTAssertEqual(viewModel.messages.compactMap(\.content), ["Keep working", "First epoch partial."])
 
@@ -581,7 +581,7 @@ final class ChatViewModelSendTests: XCTestCase {
 
         let assistantCountBeforeStale = viewModel.messages.filter { $0.role == "assistant" }.count
         // Events from the old epoch's client must not route into the new stream.
-        firstGateway.deliver(.delta(sessionID: "session-abc", text: "STALE"))
+        firstGateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "STALE"))
         viewModel.flushPendingStreamingContent()
 
         XCTAssertEqual(viewModel.messages.filter { $0.role == "assistant" }.count, assistantCountBeforeStale)
@@ -637,7 +637,7 @@ final class ChatViewModelSendTests: XCTestCase {
         let gateway = try XCTUnwrap(fabricator.latest)
 
         for index in 0..<5 {
-            gateway.deliver(.delta(sessionID: "session-abc", text: "buffered-\(index) "))
+            gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "buffered-\(index) "))
         }
 
         await viewModel.loadMessages()
@@ -685,9 +685,9 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertTrue(didStart)
         let gateway = try XCTUnwrap(fabricator.latest)
 
-        gateway.deliver(.reasoning(sessionID: "session-abc", text: "I need to inspect the workspace."))
+        gateway.deliver(GatewayEventFixture.reasoning(sessionID: "session-abc", text: "I need to inspect the workspace."))
         gateway.deliver(.toolStarted(sessionID: "session-abc", name: "read_file", input: .object(["path": .string("CURRENT.md")])))
-        gateway.deliver(.delta(sessionID: "session-abc", text: "Partial live answer."))
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "Partial live answer."))
 
         let liveAssistantID = try XCTUnwrap(viewModel.streamingAssistantMessageID)
 
@@ -1587,7 +1587,7 @@ final class ChatViewModelSendTests: XCTestCase {
         // 3. Finishing the stream (via messageInterrupted → finishStream) is the
         //    natural drain trigger. The drained send fails persistently
         //    (submitError) and must not retry in a tight loop.
-        firstGateway.deliver(.interrupted(sessionID: "session-abc"))
+        firstGateway.deliver(GatewayEventFixture.interrupted(sessionID: "session-abc"))
         XCTAssertNil(viewModel.activeStreamID)
 
         // 4. Let the drain (and any retry loop) fully quiesce. MockURLProtocol
