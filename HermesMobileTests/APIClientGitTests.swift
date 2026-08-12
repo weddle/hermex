@@ -223,7 +223,7 @@ final class APIClientGitTests: APIClientTestCase {
         XCTAssertEqual(diff.diff, "")
     }
 
-    func testGitDiffNonRepositorySurfacesHTTPError() async {
+    func testGitDiffNonRepositorySurfacesHTTPError() async throws {
         let client = makeClient { request in
             let response = HTTPURLResponse(
                 url: try XCTUnwrap(request.url),
@@ -320,7 +320,7 @@ final class APIClientGitTests: APIClientTestCase {
         XCTAssertEqual(body?["branch"] as? String, "dev")
     }
 
-    func testGitWriteErrorSurfacesStructuredServerMessage() async {
+    func testGitWriteErrorSurfacesStructuredServerMessage() async throws {
         let client = makeClient { request in
             let response = HTTPURLResponse(
                 url: try XCTUnwrap(request.url),
