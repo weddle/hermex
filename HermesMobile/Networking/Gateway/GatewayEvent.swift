@@ -13,7 +13,7 @@ import Foundation
 
 /// Runtime fields returned by `session.resume` and `session.info`.
 /// `running` is optional only so the client can identify an outdated gateway.
-struct GatewayRuntimeSnapshot {
+struct GatewayRuntimeSnapshot: Equatable {
     let running: Bool?
     let status: String?
     let model: String?
@@ -132,7 +132,7 @@ enum GatewayRedirectOutcome: Equatable {
 /// Stream events emitted by `HermesGatewayClient` and consumed by the chat
 /// coordinator. `ignored` carries no payload so unknown events are neither
 /// logged with contents nor matched on.
-enum GatewayEvent {
+enum GatewayEvent: Equatable {
     case messageDelta(sessionID: String, text: String)
     case reasoningDelta(sessionID: String, text: String)
     case messageComplete(sessionID: String, messageID: String?, content: String?, reasoning: String?)
@@ -148,4 +148,34 @@ enum GatewayEvent {
     case context(sessionID: String, percent: Double, used: Int, max: Int)
     case model(sessionID: String, model: String, provider: String)
     case ignored
+
+    static func == (lhs: GatewayEvent, rhs: GatewayEvent) -> Bool {
+        switch (lhs, rhs) {
+        case (.messageDelta(let a), .messageDelta(let b)): return a.0 == b.0 && a.1 == b.1
+        case (.reasoningDelta(let a), .reasoningDelta(let b)): return a.0 == b.0 && a.1 == b.1
+        case (.messageComplete(let a), .messageComplete(let b)):
+            return a.0 == b.0 && a.1 == b.1 && a.2 == b.2 && a.3 == b.3
+        case (.messageError(let a), .messageError(let b)): return a.0 == b.0 && a.1 == b.1
+        case (.messageInterrupted(let a), .messageInterrupted(let b)): return a == b
+        case (.sessionBusy(let a), .sessionBusy(let b)): return a.0 == b.0 && a.1 == b.1
+        case (.sessionInfo(let a), .sessionInfo(let b)): return a.0 == b.0 && a.1 == b.1
+        case (.sessionTitle(let a), .sessionTitle(let b)): return a.0 == b.0 && a.1 == b.1
+        case (.toolStarted(let a), .toolStarted(let b)):
+            return a.0 == b.0 && a.1 == b.1 && a.2 == b.2
+        case (.toolCompleted(let a), .toolCompleted(let b)):
+            return a.0 == b.0 && a.1 == b.1 && a.2 == b.2
+        case (.clarification(let a), .clarification(let b)):
+            guard a.0 == b.0, a.1 == b.1, a.2 == b.2,
+                  a.3.count == b.3.count else { return false }
+            return zip(a.3, b.3).allSatisfy { $0.label == $1.label && $0.value == $1.value }
+        case (.approval(let a), .approval(let b)):
+            return a.0 == b.0 && a.1 == b.1 && a.2 == b.2 && a.3 == b.3
+        case (.context(let a), .context(let b)):
+            return a.0 == b.0 && a.1 == b.1 && a.2 == b.2 && a.3 == b.3
+        case (.model(let a), .model(let b)):
+            return a.0 == b.0 && a.1 == b.1 && a.2 == b.2
+        case (.ignored, .ignored): return true
+        default: return false
+        }
+    }
 }

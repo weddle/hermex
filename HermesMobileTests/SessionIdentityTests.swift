@@ -360,7 +360,6 @@ final class SidebarSectionVisibilityTests: XCTestCase {
         XCTAssertTrue(visibility.tasks)
         XCTAssertTrue(visibility.skills)
         XCTAssertTrue(visibility.memory)
-        XCTAssertTrue(visibility.insights)
         XCTAssertTrue(visibility.activeProfile)
         XCTAssertTrue(visibility.projects)
         XCTAssertTrue(visibility.showsAnyUtilityLink)
@@ -375,12 +374,11 @@ final class SidebarSectionVisibilityTests: XCTestCase {
         XCTAssertTrue(visibility.showsAnyUtilityLink)
     }
 
-    func testUtilityLinkRowDropsOnlyWhenAllFourAreHidden() {
+    func testUtilityLinkRowDropsOnlyWhenAllUtilityLinksAreHidden() {
         var visibility = SidebarSectionVisibility.showAll
         visibility.tasks = false
         visibility.skills = false
         visibility.memory = false
-        visibility.insights = false
 
         XCTAssertFalse(visibility.showsAnyUtilityLink)
     }
