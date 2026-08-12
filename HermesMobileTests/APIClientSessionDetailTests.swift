@@ -1338,12 +1338,12 @@ final class APIClientSessionDetailTests: APIClientTestCase {
 
     func testToolCallDisplayFormatterFormatsStructuredNonTerminalResults() {
         let display = ToolCallDisplayFormatter.resultDisplay(
-            preview: #"{"results":[{"title":"Hermes WebUI","url":"https://example.com","snippet":"Agent UI"}]}"#,
+            preview: #"{"results":[{"title":"Hermes Agent Dashboard","url":"https://example.com","snippet":"Agent UI"}]}"#,
             toolName: "web_search"
         )
 
         let text = display?.text ?? ""
-        XCTAssertTrue(text.contains("title: Hermes WebUI"))
+        XCTAssertTrue(text.contains("title: Hermes Agent Dashboard"))
         XCTAssertTrue(text.contains("url: https://example.com"))
         XCTAssertFalse(text.contains(#"{"title""#))
         XCTAssertFalse(text.contains(#"\"title\""#))
@@ -1351,12 +1351,12 @@ final class APIClientSessionDetailTests: APIClientTestCase {
 
     func testToolCallDisplayFormatterPrefersStructuredResultOverTerminalKeysForNonTerminalTools() {
         let display = ToolCallDisplayFormatter.resultDisplay(
-            preview: #"{"results":[{"title":"Hermes WebUI","url":"https://example.com","snippet":"Agent UI"}],"exit_code":0,"error":null}"#,
+            preview: #"{"results":[{"title":"Hermes Agent Dashboard","url":"https://example.com","snippet":"Agent UI"}],"exit_code":0,"error":null}"#,
             toolName: "web_search"
         )
 
         let text = display?.text ?? ""
-        XCTAssertTrue(text.contains("title: Hermes WebUI"))
+        XCTAssertTrue(text.contains("title: Hermes Agent Dashboard"))
         XCTAssertTrue(text.contains("url: https://example.com"))
         XCTAssertFalse(text.contains("Exit code: 0"))
     }

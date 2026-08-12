@@ -1925,7 +1925,7 @@ final class ChatViewModel {
     /// composer if the send fails — empty for voice notes, whose clip isn't a
     /// composer attachment.
     ///
-    /// Unlike the old WebUI flow there is no REST `/api/chat/start` and no
+    /// Unlike the old WebUI flow there is no REST start-chat endpoint and no
     /// server-issued stream ID: `prompt.submit` needs only the session id, so
     /// `streamCoordinator.beginTurn` resumes the session over the persistent
     /// gateway and submits the prompt in one lifecycle.

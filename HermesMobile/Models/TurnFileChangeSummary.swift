@@ -8,8 +8,8 @@ import Foundation
 // changes. Each derived path is then joined to `git/status` for the `+N −M` line counts
 // and the status chip. No new endpoint; read-only over data the chat already has.
 //
-// Mirrors the webui reference aggregation in `.codex-tmp/hermes-webui/static/workspace.js`
-// (mutation tool-name set, path-arg keys, path normalization, ignore filter).
+// Mirrors the native dashboard's reference aggregation (mutation tool-name set,
+// path-arg keys, path normalization, ignore filter).
 
 /// A single file changed during one assistant turn.
 struct TurnFileChange: Identifiable, Equatable {

@@ -436,7 +436,7 @@ extension SessionSummary {
         !isEmptySidebarPlaceholder
     }
 
-    /// Mirrors hermes-webui's visible-sidebar safety net for just-created
+    /// Mirrors the native dashboard's visible-sidebar safety net for just-created
     /// placeholders: hide only the known empty Untitled shape, while keeping rows
     /// with content, pending work, streaming state, or explicit user/server state.
     /// Sort timestamps such as ``lastMessageAt`` are intentionally ignored here —
@@ -451,10 +451,10 @@ extension SessionSummary {
 
     /// True when this row originates from a scheduled cron job.
     ///
-    /// Mirrors hermes-webui's `is_cron_session` (`api/models.py`): a `cron`
-    /// source marker (`session_source` / `source_tag` / `source_label`) or a
-    /// `cron_`-prefixed session id. Tolerant — a row with no cron markers is
-    /// treated as a normal session, so unknown/missing fields never hide it.
+    /// Mirrors the native dashboard's `is_cron_session` (`api/models.py`): a
+    /// `cron` source marker (`session_source` / `source_tag` / `source_label`)
+    /// or a `cron_`-prefixed session id. Tolerant — a row with no cron markers
+    /// is treated as a normal session, so unknown/missing fields never hide it.
     var isCronSession: Bool {
         if let sessionId = sessionId?
             .trimmingCharacters(in: .whitespacesAndNewlines)

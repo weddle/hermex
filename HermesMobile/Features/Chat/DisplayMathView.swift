@@ -89,8 +89,8 @@ enum MathLaTeX {
 /// Fenced-code languages that should render as display math rather than source
 /// code (e.g. ```math, ```latex, ```tex). Models sometimes wrap a standalone
 /// equation in a math fence instead of `$$…$$`; those reach the renderer as a
-/// code block, so we re-route the math ones (parity-plus over Hermes WebUI,
-/// which shows these as code).
+/// code block, so we re-route the math ones (parity-plus over the reference
+/// dashboard, which shows these as code).
 enum MathFenceLanguage {
     static let languages: Set<String> = ["math", "latex", "tex"]
 

@@ -161,7 +161,7 @@ final class AuthManagerStateTests: XCTestCase {
         let serverB = try XCTUnwrap(URL(string: "https://b.test"))
         let manager = try await makeLoggedInManager(keychain: keychain, serverURLString: "https://a.test")
         // Both servers hold a session cookie in the shared jar (which both APIClient
-        // and SSEClient stream against).
+        // and the gateway ticket requests stream against).
         HTTPCookieStorage.shared.setCookie(try makeSessionCookie(for: serverA, value: "a-cookie"))
         HTTPCookieStorage.shared.setCookie(try makeSessionCookie(for: serverB, value: "b-cookie"))
 
