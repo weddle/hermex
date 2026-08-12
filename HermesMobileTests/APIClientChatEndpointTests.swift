@@ -6,6 +6,7 @@ import UIKit
 import UniformTypeIdentifiers
 @testable import HermesMobile
 
+final class APIClientChatEndpointTests: APIClientTestCase {
     func testPendingAttachmentBuildsBrowserCompatibleChatMessageText() {
         let html = PendingAttachment(
             name: "sample.html",
