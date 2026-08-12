@@ -1,10 +1,19 @@
 import XCTest
 @testable import HermesMobile
 
+/// Live Activity tests for the chat run surface.
+///
+/// The SSE-era `LiveActivitySpySSEClient`/`streamClient.emit(...)` plumbing has
+/// no gateway equivalent: the session IS the stream, and live events stream in
+/// as `GatewayEvent` notifications delivered through the shared
+/// `ScriptedGatewayFabricator`/`ScriptedGatewayClient`/`GatewayEventFixture`
+/// doubles (`.messageDelta`, `.reasoningDelta`, `.toolStarted`, `.toolCompleted`,
+/// `.sessionTitle`, `.sessionInfo`, `.messageComplete`). Pure reducer/sanitizer/
+/// reconciler tests are unchanged.
 @MainActor
 final class LiveActivityTests: XCTestCase {
     override func tearDown() {
-        LiveActivityURLProtocol.handler = nil
+        MockURLProtocol.requestHandler = nil
         super.tearDown()
     }
 
@@ -96,14 +105,6 @@ final class LiveActivityTests: XCTestCase {
                 existingStreamID: " stream-1 ",
                 requestedSessionID: "session-abc",
                 requestedStreamID: "stream-1"
-            )
-        )
-        XCTAssertFalse(
-            AgentLiveActivityReusePolicy.canReuseActivity(
-                existingSessionID: "session-abc",
-                existingStreamID: "stream-1",
-                requestedSessionID: "session-abc",
-                requestedStreamID: "stream-2"
             )
         )
         XCTAssertFalse(
@@ -215,57 +216,27 @@ final class LiveActivityTests: XCTestCase {
         XCTAssertFalse(url.absoluteString.contains(sessionID))
     }
 
+    @MainActor
     func testChatViewModelLiveActivityLifecycleUsesInjectedManager() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
+        let fabricator = ScriptedGatewayFabricator()
         let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Live work")
-
-        LiveActivityURLProtocol.handler = { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            return Self.jsonResponse(#"{"stream_id":"stream-123","session_id":"session-abc"}"#, for: request)
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
+        let viewModel = try makeViewModel(
+            fabricator: fabricator,
             liveActivityManager: manager
         )
 
         let didStart = await viewModel.sendMessage("Run the tests")
         XCTAssertTrue(didStart)
         XCTAssertEqual(manager.starts, [
-            SpyAgentLiveActivityManager.Start(sessionID: "session-abc", sessionTitle: "Live work", streamID: "stream-123")
+            SpyAgentLiveActivityManager.Start(sessionID: "session-abc", sessionTitle: "Live work", streamID: "session-abc")
         ])
+        let gateway = try XCTUnwrap(fabricator.latest)
 
-        streamClient.emit(.reasoning("I should inspect failures."))
-        streamClient.emit(.toolStarted(ToolStreamEvent(
-            eventType: nil,
-            name: "shell_command",
-            preview: nil,
-            args: nil,
-            duration: nil,
-            isError: nil
-        )))
-        streamClient.emit(.token("Done."))
-        streamClient.emit(.toolCompleted(ToolStreamEvent(
-            eventType: nil,
-            name: "shell_command",
-            preview: nil,
-            args: nil,
-            duration: 1.2,
-            isError: false
-        )))
-        streamClient.emit(.done(DoneStreamEvent()))
+        gateway.deliver(GatewayEventFixture.reasoning(sessionID: "session-abc", text: "I should inspect failures."))
+        gateway.deliver(GatewayEventFixture.toolStarted(sessionID: "session-abc", name: "shell_command"))
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "Done."))
+        gateway.deliver(GatewayEventFixture.toolCompleted(sessionID: "session-abc", name: "shell_command"))
+        gateway.deliver(GatewayEventFixture.complete(sessionID: "session-abc", content: nil))
 
         XCTAssertEqual(manager.updates, [
             .reasoning("I should inspect failures."),
@@ -281,112 +252,64 @@ final class LiveActivityTests: XCTestCase {
         XCTAssertEqual(viewModel.responseCompletionHapticTrigger, 1)
     }
 
+    @MainActor
     func testChatViewModelSuppressesLiveActivityResponseExcerptsByDefault() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
+        let fabricator = ScriptedGatewayFabricator()
         let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Private live work")
-
-        LiveActivityURLProtocol.handler = { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            return Self.jsonResponse(#"{"stream_id":"stream-123","session_id":"session-abc"}"#, for: request)
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
+        let viewModel = try makeViewModel(
+            fabricator: fabricator,
             liveActivityManager: manager
         )
 
         let didStart = await viewModel.sendMessage("Keep response text private")
         XCTAssertTrue(didStart)
+        let gateway = try XCTUnwrap(fabricator.latest)
 
-        streamClient.emit(.token("Private token."))
-        streamClient.emit(.interimAssistant(InterimAssistantStreamEvent(text: "Private interim.", alreadyStreamed: false)))
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "Private token."))
+        viewModel.flushPendingStreamingContent()
 
         XCTAssertTrue(manager.updates.isEmpty)
         XCTAssertTrue(viewModel.messages.contains { $0.content?.contains("Private token.") == true })
     }
 
+    @MainActor
     func testChatViewModelCanOptIntoLiveActivityResponseExcerpts() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
+        let fabricator = ScriptedGatewayFabricator()
         let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Visible live work")
-
-        LiveActivityURLProtocol.handler = { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            return Self.jsonResponse(#"{"stream_id":"stream-123","session_id":"session-abc"}"#, for: request)
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
+        let viewModel = try makeViewModel(
+            fabricator: fabricator,
             liveActivityManager: manager,
             showsLiveActivityResponseExcerpts: true
         )
 
         let didStart = await viewModel.sendMessage("Show response text")
         XCTAssertTrue(didStart)
+        let gateway = try XCTUnwrap(fabricator.latest)
 
-        streamClient.emit(.token("Visible token."))
-        streamClient.emit(.interimAssistant(InterimAssistantStreamEvent(text: "Visible interim.", alreadyStreamed: false)))
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "Visible token."))
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "Visible second."))
 
         XCTAssertEqual(manager.updates, [
             .token("Visible token."),
-            .interimAssistant("Visible interim.")
+            .token("Visible second.")
         ])
     }
 
+    @MainActor
     func testDisablingLiveActivityResponseExcerptsClearsActiveExcerpt() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
+        let fabricator = ScriptedGatewayFabricator()
         let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Toggle live work")
-
-        LiveActivityURLProtocol.handler = { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            return Self.jsonResponse(#"{"stream_id":"stream-123","session_id":"session-abc"}"#, for: request)
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
+        let viewModel = try makeViewModel(
+            fabricator: fabricator,
             liveActivityManager: manager,
             showsLiveActivityResponseExcerpts: true
         )
 
         let didStart = await viewModel.sendMessage("Toggle response text")
         XCTAssertTrue(didStart)
+        let gateway = try XCTUnwrap(fabricator.latest)
 
-        streamClient.emit(.token("Visible token."))
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "Visible token."))
         viewModel.setShowsLiveActivityResponseExcerpts(false)
 
         XCTAssertEqual(manager.updates, [
@@ -395,39 +318,20 @@ final class LiveActivityTests: XCTestCase {
         ])
     }
 
+    @MainActor
     func testFollowupMessageStartsNewLiveActivityAfterCompletedResponse() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
+        let fabricator = ScriptedGatewayFabricator()
         let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Live work")
-        var nextStreamNumber = 1
-
-        LiveActivityURLProtocol.handler = { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            let streamID = "stream-\(nextStreamNumber)"
-            nextStreamNumber += 1
-            return Self.jsonResponse(#"{"stream_id":"\#(streamID)","session_id":"session-abc"}"#, for: request)
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
+        let viewModel = try makeViewModel(
+            fabricator: fabricator,
             liveActivityManager: manager
         )
 
         let didStartFirstResponse = await viewModel.sendMessage("Run the first answer")
         XCTAssertTrue(didStartFirstResponse)
-        streamClient.emit(.token("First answer."))
-        streamClient.emit(.done(DoneStreamEvent()))
+        let gateway = try XCTUnwrap(fabricator.latest)
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "First answer."))
+        gateway.deliver(GatewayEventFixture.complete(sessionID: "session-abc", content: nil))
 
         XCTAssertEqual(manager.ends, [
             SpyAgentLiveActivityManager.End(
@@ -442,42 +346,26 @@ final class LiveActivityTests: XCTestCase {
         XCTAssertTrue(didStartFollowup)
 
         XCTAssertEqual(manager.starts, [
-            SpyAgentLiveActivityManager.Start(sessionID: "session-abc", sessionTitle: "Live work", streamID: "stream-1"),
-            SpyAgentLiveActivityManager.Start(sessionID: "session-abc", sessionTitle: "Live work", streamID: "stream-2")
+            SpyAgentLiveActivityManager.Start(sessionID: "session-abc", sessionTitle: "Live work", streamID: "session-abc"),
+            SpyAgentLiveActivityManager.Start(sessionID: "session-abc", sessionTitle: "Live work", streamID: "session-abc")
         ])
-        XCTAssertEqual(viewModel.activeStreamID, "stream-2")
+        XCTAssertEqual(viewModel.activeStreamID, "session-abc")
     }
 
+    @MainActor
     func testTitleStreamEventUpdatesLiveActivityTitle() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
+        let fabricator = ScriptedGatewayFabricator()
         let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Untitled Session")
-
-        LiveActivityURLProtocol.handler = { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            return Self.jsonResponse(#"{"stream_id":"stream-123","session_id":"session-abc"}"#, for: request)
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
+        let viewModel = try makeViewModel(
+            fabricator: fabricator,
             liveActivityManager: manager
         )
 
         let didStart = await viewModel.sendMessage("Name this run")
         XCTAssertTrue(didStart)
+        let gateway = try XCTUnwrap(fabricator.latest)
 
-        streamClient.emit(.title(TitleStreamEvent(sessionId: "session-abc", title: "Generated Search Plan")))
+        gateway.deliver(GatewayEventFixture.title(sessionID: "session-abc", title: "Generated Search Plan"))
 
         XCTAssertEqual(viewModel.displayTitle, "Generated Search Plan")
         XCTAssertEqual(manager.updates, [
@@ -485,36 +373,24 @@ final class LiveActivityTests: XCTestCase {
         ])
     }
 
-    func testDoneSessionTitleUpdatesLiveActivityBeforeCompletion() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
+    /// The gateway carries the generated title as a `session.title` stream
+    /// event (not a `done`-payload session), delivered before the turn's
+    /// `message.complete`. Both still reach the Live Activity before finalization.
+    @MainActor
+    func testSessionTitleEventUpdatesLiveActivityBeforeCompletion() async throws {
+        let fabricator = ScriptedGatewayFabricator()
         let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Untitled Session")
-
-        LiveActivityURLProtocol.handler = { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            return Self.jsonResponse(#"{"stream_id":"stream-123","session_id":"session-abc"}"#, for: request)
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
+        let viewModel = try makeViewModel(
+            fabricator: fabricator,
             liveActivityManager: manager
         )
 
         let didStart = await viewModel.sendMessage("Finish with a generated title")
         XCTAssertTrue(didStart)
+        let gateway = try XCTUnwrap(fabricator.latest)
 
-        streamClient.emit(.done(DoneStreamEvent(session: try Self.sessionDetail(id: "session-abc", title: "Generated Finish Plan"))))
+        gateway.deliver(GatewayEventFixture.title(sessionID: "session-abc", title: "Generated Finish Plan"))
+        gateway.deliver(GatewayEventFixture.complete(sessionID: "session-abc", content: nil))
 
         XCTAssertEqual(viewModel.displayTitle, "Generated Finish Plan")
         XCTAssertEqual(manager.updates, [
@@ -527,37 +403,24 @@ final class LiveActivityTests: XCTestCase {
         ))
     }
 
-    func testStreamEndWithoutDoneStillCompletesLiveActivity() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
+    /// A turn that ends without an explicit `message.complete` still finalizes
+    /// the Live Activity: the gateway's `session.info` echo reports the run is
+    /// no longer running with no live projection, which completes the response.
+    @MainActor
+    func testSessionInfoNotRunningCompletesLiveActivity() async throws {
+        let fabricator = ScriptedGatewayFabricator()
         let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Live work")
-
-        LiveActivityURLProtocol.handler = { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            return Self.jsonResponse(#"{"stream_id":"stream-123","session_id":"session-abc"}"#, for: request)
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
+        let viewModel = try makeViewModel(
+            fabricator: fabricator,
             liveActivityManager: manager
         )
 
         let didStart = await viewModel.sendMessage("Run the tests")
         XCTAssertTrue(didStart)
+        let gateway = try XCTUnwrap(fabricator.latest)
 
-        streamClient.emit(.token("Done."))
-        streamClient.emit(.streamEnd)
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "Done."))
+        gateway.deliver(GatewayEventFixture.info(sessionID: "session-abc", running: false))
 
         XCTAssertEqual(manager.ends, [
             SpyAgentLiveActivityManager.End(
@@ -569,47 +432,43 @@ final class LiveActivityTests: XCTestCase {
         XCTAssertNil(viewModel.activeStreamID)
     }
 
-    func testStatusRefreshCompletionEndsLiveActivityFromCompletedTranscript() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
+    /// A transcript refresh that shows a completed assistant response finalizes
+    /// the Live Activity (the gateway `refreshTranscriptIfCompleted` path).
+    @MainActor
+    func testTranscriptRefreshCompletionEndsLiveActivityFromCompletedTranscript() async throws {
+        let fabricator = ScriptedGatewayFabricator()
         let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Live work")
-        var requestPaths: [String] = []
-
-        LiveActivityURLProtocol.handler = { request in
-            requestPaths.append(request.url?.path ?? "")
-
+        let viewModel = try makeViewModel(fabricator: fabricator, liveActivityManager: manager) { request in
             switch request.url?.path {
-            case "/api/chat/start":
-                return Self.jsonResponse(#"{"stream_id":"stream-123","session_id":"session-abc"}"#, for: request)
-            case "/api/chat/stream/status":
-                return Self.jsonResponse(#"{"active":false,"stream_id":"stream-123"}"#, for: request)
-            case "/api/session":
-                return Self.jsonResponse("""
+            case "/api/auth/ws-ticket":
+                return apiTestJSONResponse(#"{"ticket": "ticket-1"}"#, for: request)
+            case "/api/sessions/session-abc":
+                return apiTestJSONResponse("""
                 {
-                  "session": {
-                    "session_id": "session-abc",
-                    "title": "Live work",
-                    "messages": [
-                      {
-                        "role": "user",
-                        "content": "Keep working",
-                        "timestamp": 1770000100,
-                        "message_id": "user-1"
-                      },
-                      {
-                        "role": "assistant",
-                        "content": "Completed from transcript refresh.",
-                        "timestamp": 1770000110,
-                        "message_id": "assistant-1"
-                      }
-                    ]
-                  }
+                  "id": "session-abc",
+                  "title": "Live work",
+                  "cwd": "/tmp/workspace",
+                  "message_count": 2
+                }
+                """, for: request)
+            case "/api/sessions/session-abc/messages":
+                return apiTestJSONResponse("""
+                {
+                  "session_id": "session-abc",
+                  "messages": [
+                    {
+                      "role": "user",
+                      "content": "Keep working",
+                      "timestamp": 1770000100,
+                      "message_id": "user-1"
+                    },
+                    {
+                      "role": "assistant",
+                      "content": "Completed from transcript refresh.",
+                      "timestamp": 1770000110,
+                      "message_id": "assistant-1"
+                    }
+                  ]
                 }
                 """, for: request)
             default:
@@ -618,28 +477,15 @@ final class LiveActivityTests: XCTestCase {
             }
         }
 
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
-            liveActivityManager: manager
-        )
-
         let didStart = await viewModel.sendMessage("Keep working")
         XCTAssertTrue(didStart)
-        streamClient.emit(.toolStarted(ToolStreamEvent(
-            eventType: nil,
-            name: "shell_command",
-            preview: nil,
-            args: nil,
-            duration: nil,
-            isError: nil
-        )))
+        let gateway = try XCTUnwrap(fabricator.latest)
+        gateway.deliver(GatewayEventFixture.toolStarted(sessionID: "session-abc", name: "shell_command"))
 
-        await viewModel.refreshTranscriptIfActiveStreamCompleted(streamID: "stream-123")
+        // Prime the "latest server load has an assistant response" signal, then run
+        // the completion check the coordinator exposes for background refresh.
+        await viewModel.loadMessages()
+        await viewModel.refreshTranscriptIfActiveStreamCompleted(streamID: "session-abc")
 
         XCTAssertEqual(manager.ends, [
             SpyAgentLiveActivityManager.End(
@@ -649,47 +495,43 @@ final class LiveActivityTests: XCTestCase {
             )
         ])
         XCTAssertNil(viewModel.activeStreamID)
-        XCTAssertEqual(streamClient.stopCount, 1)
         XCTAssertEqual(viewModel.responseCompletionHapticTrigger, 1)
         XCTAssertEqual(viewModel.messages.compactMap(\.content), [
             "Keep working",
             "Completed from transcript refresh."
         ])
-        XCTAssertEqual(requestPaths, ["/api/chat/start", "/api/chat/stream/status", "/api/session"])
     }
 
-    func testStatusRefreshWithoutFinalAssistantDoesNotCompleteLiveActivity() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
+    /// Without a final assistant message after the latest user message, the
+    /// transcript-refresh completion check must NOT finalize the Live Activity.
+    @MainActor
+    func testTranscriptRefreshWithoutFinalAssistantDoesNotCompleteLiveActivity() async throws {
+        let fabricator = ScriptedGatewayFabricator()
         let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Live work")
-
-        LiveActivityURLProtocol.handler = { request in
+        let viewModel = try makeViewModel(fabricator: fabricator, liveActivityManager: manager) { request in
             switch request.url?.path {
-            case "/api/chat/start":
-                return Self.jsonResponse(#"{"stream_id":"stream-123","session_id":"session-abc"}"#, for: request)
-            case "/api/chat/stream/status":
-                return Self.jsonResponse(#"{"active":false,"stream_id":"stream-123"}"#, for: request)
-            case "/api/session":
-                return Self.jsonResponse("""
+            case "/api/auth/ws-ticket":
+                return apiTestJSONResponse(#"{"ticket": "ticket-1"}"#, for: request)
+            case "/api/sessions/session-abc":
+                return apiTestJSONResponse("""
                 {
-                  "session": {
-                    "session_id": "session-abc",
-                    "title": "Live work",
-                    "messages": [
-                      {
-                        "role": "user",
-                        "content": "Keep working",
-                        "timestamp": 1770000100,
-                        "message_id": "user-1"
-                      }
-                    ]
-                  }
+                  "id": "session-abc",
+                  "title": "Live work",
+                  "message_count": 1
+                }
+                """, for: request)
+            case "/api/sessions/session-abc/messages":
+                return apiTestJSONResponse("""
+                {
+                  "session_id": "session-abc",
+                  "messages": [
+                    {
+                      "role": "user",
+                      "content": "Keep working",
+                      "timestamp": 1770000100,
+                      "message_id": "user-1"
+                    }
+                  ]
                 }
                 """, for: request)
             default:
@@ -698,119 +540,41 @@ final class LiveActivityTests: XCTestCase {
             }
         }
 
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
+        let didStart = await viewModel.sendMessage("Keep working")
+        XCTAssertTrue(didStart)
+        let gateway = try XCTUnwrap(fabricator.latest)
+        gateway.deliver(GatewayEventFixture.toolStarted(sessionID: "session-abc", name: "shell_command"))
+
+        await viewModel.loadMessages()
+        await viewModel.refreshTranscriptIfActiveStreamCompleted(streamID: "session-abc")
+
+        XCTAssertTrue(manager.ends.isEmpty)
+        XCTAssertEqual(viewModel.activeStreamID, "session-abc")
+        XCTAssertEqual(viewModel.responseCompletionHapticTrigger, 0)
+    }
+
+    /// Suspending for background marks the Live Activity stale; it is not
+    /// finalized (a later reconnect/resume owns the outcome).
+    @MainActor
+    func testSuspendingForBackgroundMarksLiveActivityStale() async throws {
+        let fabricator = ScriptedGatewayFabricator()
+        let manager = SpyAgentLiveActivityManager()
+        let viewModel = try makeViewModel(
+            fabricator: fabricator,
             liveActivityManager: manager
         )
 
         let didStart = await viewModel.sendMessage("Keep working")
         XCTAssertTrue(didStart)
-        streamClient.emit(.toolStarted(ToolStreamEvent(
-            eventType: nil,
-            name: "shell_command",
-            preview: nil,
-            args: nil,
-            duration: nil,
-            isError: nil
-        )))
+        let gateway = try XCTUnwrap(fabricator.latest)
+        gateway.deliver(GatewayEventFixture.reasoning(sessionID: "session-abc", text: "Thinking about the final answer."))
+        XCTAssertEqual(manager.updates, [.reasoning("Thinking about the final answer.")])
 
-        await viewModel.refreshTranscriptIfActiveStreamCompleted(streamID: "stream-123")
-
-        XCTAssertTrue(manager.ends.isEmpty)
-        XCTAssertEqual(viewModel.activeStreamID, "stream-123")
-        XCTAssertEqual(streamClient.stopCount, 0)
-        XCTAssertEqual(viewModel.responseCompletionHapticTrigger, 0)
-    }
-
-    func testForegroundReconnectCompletionEndsLiveActivityAndAllowsFollowupStream() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
-        let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Live work")
-        var nextStreamNumber = 1
-
-        LiveActivityURLProtocol.handler = { request in
-            switch request.url?.path {
-            case "/api/chat/start":
-                let streamID = "stream-\(nextStreamNumber)"
-                nextStreamNumber += 1
-                return Self.jsonResponse(#"{"stream_id":"\#(streamID)","session_id":"session-abc"}"#, for: request)
-            case "/api/chat/stream/status":
-                return Self.jsonResponse(#"{"active":false,"stream_id":"stream-1","replay_available":false}"#, for: request)
-            case "/api/session":
-                return Self.jsonResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "title": "Live work",
-                    "messages": [
-                      {
-                        "role": "user",
-                        "content": "Keep working",
-                        "timestamp": 1770000100,
-                        "message_id": "user-1"
-                      },
-                      {
-                        "role": "assistant",
-                        "content": "Completed after foreground reconnect.",
-                        "timestamp": 1770000110,
-                        "message_id": "assistant-1"
-                      }
-                    ]
-                  }
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
-            liveActivityManager: manager
-        )
-
-        let didStartFirstResponse = await viewModel.sendMessage("Keep working")
-        XCTAssertTrue(didStartFirstResponse)
-        streamClient.emit(.reasoning("Thinking about the final answer."))
         viewModel.suspendStreamForBackground()
 
-        await viewModel.reconnectStreamIfNeeded()
-
         XCTAssertTrue(manager.didMarkStale)
-        XCTAssertEqual(manager.ends, [
-            SpyAgentLiveActivityManager.End(
-                status: .complete,
-                activity: "Response complete",
-                errorSummary: nil
-            )
-        ])
-        XCTAssertNil(viewModel.activeStreamID)
-        XCTAssertEqual(streamClient.stopCount, 2)
-
-        let didStartFollowup = await viewModel.sendMessage("Follow up")
-        XCTAssertTrue(didStartFollowup)
-        XCTAssertEqual(manager.starts, [
-            SpyAgentLiveActivityManager.Start(sessionID: "session-abc", sessionTitle: "Live work", streamID: "stream-1"),
-            SpyAgentLiveActivityManager.Start(sessionID: "session-abc", sessionTitle: "Live work", streamID: "stream-2")
-        ])
-        XCTAssertEqual(viewModel.activeStreamID, "stream-2")
+        XCTAssertTrue(manager.ends.isEmpty)
+        XCTAssertEqual(viewModel.activeStreamID, "session-abc")
     }
 
     func testFinalLiveActivityStateKeepsExcerptVisible() {
@@ -863,28 +627,42 @@ final class LiveActivityTests: XCTestCase {
         XCTAssertEqual(cleared.updatedAt, Date(timeIntervalSince1970: 130))
     }
 
+    // MARK: - Helpers
+
+    @MainActor
+    private func makeViewModel(
+        fabricator: ScriptedGatewayFabricator,
+        liveActivityManager: SpyAgentLiveActivityManager,
+        showsLiveActivityResponseExcerpts: Bool = false,
+        handler: ((URLRequest) throws -> (HTTPURLResponse, Data))? = nil
+    ) throws -> ChatViewModel {
+        MockURLProtocol.requestHandler = handler ?? { request in
+            XCTAssertEqual(request.url?.path, "/api/auth/ws-ticket")
+            return apiTestJSONResponse(#"{"ticket": "ticket-1"}"#, for: request)
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let urlSession = URLSession(configuration: configuration)
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let client = APIClient(baseURL: server, session: urlSession)
+        let summary = try Self.sessionSummary(id: "session-abc", title: "Live work")
+
+        return ChatViewModel(
+            session: summary,
+            server: server,
+            client: client,
+            liveActivityManager: liveActivityManager,
+            showsLiveActivityResponseExcerpts: showsLiveActivityResponseExcerpts,
+            gatewayFabricator: fabricator.fabricator
+        )
+    }
+
     private static func sessionSummary(id: String, title: String) throws -> SessionSummary {
         let data = Data(#"{"session_id":"\#(id)","title":"\#(title)"}"#.utf8)
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         return try decoder.decode(SessionSummary.self, from: data)
-    }
-
-    private static func sessionDetail(id: String, title: String) throws -> SessionDetail {
-        let data = Data(#"{"session_id":"\#(id)","title":"\#(title)"}"#.utf8)
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(SessionDetail.self, from: data)
-    }
-
-    private static func jsonResponse(_ json: String, for request: URLRequest) -> (HTTPURLResponse, Data) {
-        let response = HTTPURLResponse(
-            url: request.url!,
-            statusCode: 200,
-            httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": "application/json"]
-        )!
-        return (response, Data(json.utf8))
     }
 
     // MARK: - Orphaned activity reconciliation (#246)
@@ -1150,7 +928,7 @@ final class LiveActivityTests: XCTestCase {
     }
 
     // #246 follow-up (PR #266 #3): the orphan reconciler must defer to a stream
-    // whose SSE is live in this process. The manager tracks that ownership via the
+    // whose connection is live in this process. The manager tracks that ownership via the
     // lifecycle calls the coordinator already makes — set on `start`, cleared on
     // `markStale` (suspend/trouble) and `end` (finalize) — and
     // `orphanedActivities()` skips the tracked stream. This verifies the
@@ -1160,7 +938,7 @@ final class LiveActivityTests: XCTestCase {
     func testActiveConnectedStreamIDTracksLiveConnectionLifecycle() {
         let manager = AgentLiveActivityManager()
 
-        // A live SSE connection claims the stream so the reconciler leaves it alone.
+        // A live connection claims the stream so the reconciler leaves it alone.
         manager.start(sessionID: "session-1", sessionTitle: "Title", streamID: "stream-abc")
         XCTAssertEqual(manager.activeConnectedStreamID, "stream-abc")
 
@@ -1213,56 +991,4 @@ private final class SpyAgentLiveActivityManager: AgentLiveActivityManaging {
     func end(status: AgentRunActivityStatus, activity: String, errorSummary: String?) {
         ends.append(End(status: status, activity: activity, errorSummary: errorSummary))
     }
-}
-
-private final class LiveActivitySpySSEClient: SSEStreamingClient {
-    private var onEvent: (@MainActor (SSEEvent) -> Void)?
-    private(set) var startedURLs: [URL] = []
-    private(set) var stopCount = 0
-    private(set) var lastEventID: String?
-
-    func start(url: URL, onEvent: @escaping @MainActor (SSEEvent) -> Void) {
-        startedURLs.append(url)
-        lastEventID = nil
-        self.onEvent = onEvent
-    }
-
-    func stop() {
-        stopCount += 1
-    }
-
-    @MainActor
-    func emit(_ event: SSEEvent) {
-        onEvent?(event)
-    }
-}
-
-private final class LiveActivityURLProtocol: URLProtocol {
-    static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
-
-    override class func canInit(with request: URLRequest) -> Bool {
-        true
-    }
-
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
-        request
-    }
-
-    override func startLoading() {
-        guard let handler = Self.handler else {
-            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
-            return
-        }
-
-        do {
-            let (response, data) = try handler(request)
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
-            client?.urlProtocolDidFinishLoading(self)
-        } catch {
-            client?.urlProtocol(self, didFailWithError: error)
-        }
-    }
-
-    override func stopLoading() {}
 }

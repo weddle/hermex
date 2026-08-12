@@ -4,6 +4,13 @@ import XCTest
 
 /// Display-pacing tests for issue #212: buffered streamed tokens are revealed
 /// word-by-word at an adaptive cadence, while completion paths flush instantly.
+///
+/// Gateway era: each test drives `beginTurn` through the shared
+/// `ScriptedGatewayFabricator`/`ScriptedGatewayClient`/`GatewayEventFixture`
+/// doubles, then delivers `.messageDelta` / `.messageComplete` /
+/// `.messageInterrupted` events to the live gateway. The pacing/quota logic is
+/// transport-agnostic (it proxies display timing only), so the assertions are
+/// unchanged from the SSE era apart from the event delivery.
 final class ChatViewModelStreamingPaceTests: XCTestCase {
     override func tearDown() {
         MockURLProtocol.requestHandler = nil
@@ -12,18 +19,19 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     func testBufferedBurstRevealsWordByWordAtCadence() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
+        let fabricator = ScriptedGatewayFabricator()
         // 60s lag bound keeps the quota at one word per tick for this backlog.
         let viewModel = try makeViewModel(
-            streamClient: streamClient,
+            fabricator: fabricator,
             wordCadenceNanoseconds: 200_000_000,
             maxLagNanoseconds: 60_000_000_000
         )
 
         let didStart = await viewModel.sendMessage("Stream a reply")
         XCTAssertTrue(didStart)
+        let gateway = try XCTUnwrap(fabricator.latest)
 
-        streamClient.emit(.token("alpha beta gamma delta"))
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "alpha beta gamma delta"))
 
         let target = "alpha beta gamma delta"
         let observed = try await observeAssistantContent(viewModel, until: target)
@@ -42,29 +50,30 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         }
 
         // The drain loop must re-arm for tokens arriving after the buffer emptied.
-        streamClient.emit(.token(" epsilon"))
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: " epsilon"))
         _ = try await observeAssistantContent(viewModel, until: target + " epsilon")
         XCTAssertEqual(assistantContent(of: viewModel), target + " epsilon")
     }
 
     @MainActor
     func testLargeBacklogCatchesUpWithinLagBound() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
+        let fabricator = ScriptedGatewayFabricator()
         // 60 words × 100ms cadence = 6s of backlog; the 300ms lag bound forces a
         // ~20-word quota per tick, so convergence inside the 4s observation window
         // proves catch-up scaling (steady one-word cadence would time out).
         let viewModel = try makeViewModel(
-            streamClient: streamClient,
+            fabricator: fabricator,
             wordCadenceNanoseconds: 100_000_000,
             maxLagNanoseconds: 300_000_000
         )
 
         let didStart = await viewModel.sendMessage("Stream a reply")
         XCTAssertTrue(didStart)
+        let gateway = try XCTUnwrap(fabricator.latest)
 
         let words = (0..<60).map { "w\($0) " }
         for word in words {
-            streamClient.emit(.token(word))
+            gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: word))
         }
 
         let target = words.joined()
@@ -79,17 +88,18 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     func testDoneEventFlushesRemainingBufferImmediately() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
-        let viewModel = try makeStalledDrainViewModel(streamClient: streamClient)
+        let fabricator = ScriptedGatewayFabricator()
+        let viewModel = try makeStalledDrainViewModel(fabricator: fabricator)
 
         let didStart = await viewModel.sendMessage("Stream a reply")
         XCTAssertTrue(didStart)
+        let gateway = try XCTUnwrap(fabricator.latest)
 
-        streamClient.emit(.token("alpha beta gamma"))
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "alpha beta gamma"))
         _ = try await observeAssistantContent(viewModel, until: "alpha ")
         XCTAssertEqual(assistantContent(of: viewModel), "alpha ")
 
-        streamClient.emit(.done(DoneStreamEvent()))
+        gateway.deliver(GatewayEventFixture.complete(sessionID: "session-abc", content: nil))
         XCTAssertEqual(assistantContent(of: viewModel), "alpha beta gamma")
 
         // Nothing may trickle in after completion.
@@ -99,17 +109,18 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     func testCancelledEventFlushesRemainingBufferImmediately() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
-        let viewModel = try makeStalledDrainViewModel(streamClient: streamClient)
+        let fabricator = ScriptedGatewayFabricator()
+        let viewModel = try makeStalledDrainViewModel(fabricator: fabricator)
 
         let didStart = await viewModel.sendMessage("Stream a reply")
         XCTAssertTrue(didStart)
+        let gateway = try XCTUnwrap(fabricator.latest)
 
-        streamClient.emit(.token("alpha beta gamma"))
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "alpha beta gamma"))
         _ = try await observeAssistantContent(viewModel, until: "alpha ")
         XCTAssertEqual(assistantContent(of: viewModel), "alpha ")
 
-        streamClient.emit(.cancelled)
+        gateway.deliver(GatewayEventFixture.interrupted(sessionID: "session-abc"))
         XCTAssertEqual(assistantContent(of: viewModel), "alpha beta gamma")
 
         try await Task.sleep(nanoseconds: 150_000_000)
@@ -118,15 +129,16 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     func testPacedContentConvergesByteIdenticalToUnpacedJoin() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
+        let fabricator = ScriptedGatewayFabricator()
         let viewModel = try makeViewModel(
-            streamClient: streamClient,
+            fabricator: fabricator,
             wordCadenceNanoseconds: 1_000_000,
             maxLagNanoseconds: 50_000_000
         )
 
         let didStart = await viewModel.sendMessage("Stream a reply")
         XCTAssertTrue(didStart)
+        let gateway = try XCTUnwrap(fabricator.latest)
 
         // Awkward chunk boundaries: ZWJ family, flag, CRLF, tabs, doubled spaces,
         // and a combining mark split across chunks ("cafe" + U+0301).
@@ -138,7 +150,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             "\u{301} fin"
         ]
         for chunk in chunks {
-            streamClient.emit(.token(chunk))
+            gateway.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: chunk))
         }
 
         let target = chunks.joined()
@@ -158,10 +170,10 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
     /// so completion-path flushes are observable.
     @MainActor
     private func makeStalledDrainViewModel(
-        streamClient: PacingSpySSEStreamingClient
+        fabricator: ScriptedGatewayFabricator
     ) throws -> ChatViewModel {
         try makeViewModel(
-            streamClient: streamClient,
+            fabricator: fabricator,
             wordCadenceNanoseconds: 60_000_000_000,
             maxLagNanoseconds: 3_600_000_000_000
         )
@@ -169,23 +181,16 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     private func makeViewModel(
-        streamClient: PacingSpySSEStreamingClient,
+        fabricator: ScriptedGatewayFabricator,
         wordCadenceNanoseconds: UInt64,
         maxLagNanoseconds: UInt64
     ) throws -> ChatViewModel {
         MockURLProtocol.requestHandler = { request in
-            switch request.url?.path {
-            case "/api/chat/start":
-                return apiTestJSONResponse(
-                    #"{"session_id": "session-abc", "stream_id": "stream-123"}"#,
-                    for: request
-                )
-            default:
-                return apiTestJSONResponse(
-                    #"{"session": {"session_id": "session-abc", "title": "Pacing", "messages": []}}"#,
-                    for: request
-                )
-            }
+            XCTAssertEqual(request.url?.path, "/api/auth/ws-ticket")
+            return apiTestJSONResponse(
+                #"{"ticket": "ticket-1"}"#,
+                for: request
+            )
         }
 
         let configuration = URLSessionConfiguration.ephemeral
@@ -207,12 +212,10 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             session: summary,
             server: server,
             client: client,
-            streamClient: streamClient,
-            approvalStreamClient: PacingSpySSEStreamingClient(),
-            clarifyStreamClient: PacingSpySSEStreamingClient(),
             streamingScrollCoalescingDelayNanoseconds: 1_000_000,
             streamingWordRevealCadenceNanoseconds: wordCadenceNanoseconds,
-            streamingMaxRevealLagNanoseconds: maxLagNanoseconds
+            streamingMaxRevealLagNanoseconds: maxLagNanoseconds,
+            gatewayFabricator: fabricator.fabricator
         )
     }
 
@@ -277,22 +280,5 @@ final class ChatStreamingMotionTests: XCTestCase {
             ChatMotion.streamingFollow(reduceMotion: false),
             ChatMotion.scrollToLatest(reduceMotion: false)
         )
-    }
-}
-
-private final class PacingSpySSEStreamingClient: SSEStreamingClient {
-    private(set) var lastEventID: String?
-    private var onEvent: (@MainActor (SSEEvent) -> Void)?
-
-    func start(url: URL, onEvent: @escaping @MainActor (SSEEvent) -> Void) {
-        lastEventID = nil
-        self.onEvent = onEvent
-    }
-
-    func stop() {}
-
-    @MainActor
-    func emit(_ event: SSEEvent) {
-        onEvent?(event)
     }
 }

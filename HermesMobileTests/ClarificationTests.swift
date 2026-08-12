@@ -1,9 +1,17 @@
 import XCTest
 @testable import HermesMobile
 
+/// Clarification prompt tests. The SSE-era `/api/clarify/respond` REST path
+/// was replaced by the gateway `clarify.respond` RPC, and clarify payloads
+/// arrive as `clarify` gateway stream events routed through
+/// `ChatStreamCoordinator` → `applyClarificationUpdate`. The pure model-decode
+/// and marker-parsing tests are kept as-is; the stream tests drive
+/// `.clarification` `GatewayEvent`s through the shared
+/// `ScriptedGatewayFabricator`/`ScriptedGatewayClient`/`GatewayEventFixture`
+/// doubles.
 final class ClarificationTests: XCTestCase {
     override func tearDown() {
-        ClarificationMockURLProtocol.requestHandler = nil
+        MockURLProtocol.requestHandler = nil
         super.tearDown()
     }
 
@@ -75,225 +83,89 @@ final class ClarificationTests: XCTestCase {
         XCTAssertNil(cleared.stale)
     }
 
-    @MainActor
-    func testClarificationStale409DismissesPromptWithFriendlyExpiredMessage() async throws {
-        let streamClient = ClarificationSpySSEStreamingClient()
-        let approvalStreamClient = ClarificationSpySSEStreamingClient()
-        let clarifyStreamClient = ClarificationSpySSEStreamingClient()
-        var didRefreshPendingAfterStale = false
-        let viewModel = try makeViewModel(
-            streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient
-        ) { request in
-            switch request.url?.path {
-            case "/api/chat/start":
-                return jsonResponse(#"{"session_id": "session-abc", "stream_id": "stream-123"}"#, for: request)
-            case "/api/clarify/respond":
-                return jsonResponse(
-                    #"{"ok": false, "error": "Clarification prompt expired or not found. The agent may have already proceeded.", "stale": true}"#,
-                    statusCode: 409,
-                    for: request
-                )
-            case "/api/clarify/pending":
-                didRefreshPendingAfterStale = true
-                return jsonResponse(#"{"pending": null}"#, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
+    /// The SSE decoder is gone; clarify payloads now arrive as `clarify`
+    /// gateway event notifications parsed by `StreamEventParser`. This pins the
+    /// wire shape the coordinator consumes: `request_id` + `question` +
+    /// `choices[{label,value}]` → `.clarification`.
+    func testStreamEventParserParsesClarifyNotification() throws {
+        let params = try JSONDecoder().decode(GatewayValue.self, from: Data("""
+        {
+          "type": "clarify",
+          "session_id": "session-abc",
+          "payload": {
+            "request_id": "clarify-2",
+            "question": "Choose deployment target",
+            "choices": [
+              {"label": "iPhone", "value": "iphone"},
+              {"label": "iPad", "value": "ipad"}
+            ]
+          }
         }
+        """.utf8))
 
-        let didStart = await viewModel.sendMessage("Continue")
-        XCTAssertTrue(didStart)
-        clarifyStreamClient.emit(.clarificationPending(ClarificationPendingResponse(
-            pending: PendingClarification(
-                clarifyId: "clarify-1",
-                question: "Which branch?",
-                sessionId: "session-abc"
-            ),
-            pendingCount: 1
-        )))
+        let event = try XCTUnwrap(StreamEventParser.parse(params: params))
 
-        let didRespond = await viewModel.respondToClarification("Use main")
-
-        // Expired prompt: the stale card dismisses with a friendly explanation
-        // instead of sticking around behind a generic failure (issue #25).
-        XCTAssertFalse(didRespond)
-        XCTAssertNil(viewModel.clarificationPrompt)
-        XCTAssertNil(viewModel.clarificationErrorMessage)
-        XCTAssertEqual(
-            viewModel.sendErrorMessage,
-            PendingPromptExpiredError(prompt: .clarification).localizedDescription
-        )
-        XCTAssertTrue(didRefreshPendingAfterStale)
-        XCTAssertEqual(viewModel.activeStreamID, "stream-123")
+        guard case .clarification(let sessionID, let requestID, let question, let choices) = event else {
+            XCTFail("Expected .clarification, got \(event)")
+            return
+        }
+        XCTAssertEqual(sessionID, "session-abc")
+        XCTAssertEqual(requestID, "clarify-2")
+        XCTAssertEqual(question, "Choose deployment target")
+        XCTAssertEqual(choices.count, 2)
+        XCTAssertEqual(choices.first?.label, "iPhone")
+        XCTAssertEqual(choices.first?.value, "iphone")
     }
 
-    func testSSEDecoderHandlesClarifyAndInitialEvents() {
-        let clarify = SSEEventDecoder.decode(
-            eventType: "clarify",
-            data: """
-            {
-              "pending": {
-                "clarify_id": "clarify-2",
-                "question": "Choose deployment target",
-                "choices_offered": ["iPhone", "iPad"],
-                "session_id": "session-abc"
-              },
-              "pending_count": 1
-            }
-            """
-        )
-
-        guard case .clarificationPending(let clarifyResponse) = clarify else {
-            XCTFail("Expected clarificationPending, got \(clarify)")
-            return
-        }
-
-        XCTAssertEqual(clarifyResponse.pending?.clarifyId, "clarify-2")
-        XCTAssertEqual(clarifyResponse.pending?.displayChoices, ["iPhone", "iPad"])
-        XCTAssertEqual(clarifyResponse.pendingCount, 1)
-
-        let initial = SSEEventDecoder.decode(
-            eventType: "initial",
-            data: """
-            {
-              "pending": {
-                "question": "What should I do next?",
-                "choices_offered": ["Run tests", "Stop"]
-              },
-              "pending_count": 1
-            }
-            """
-        )
-
-        guard case .clarificationPending(let initialResponse) = initial else {
-            XCTFail("Expected clarificationPending initial event, got \(initial)")
-            return
-        }
-
-        XCTAssertEqual(initialResponse.pending?.displayQuestion, "What should I do next?")
-        XCTAssertEqual(initialResponse.pending?.displayChoices, ["Run tests", "Stop"])
+    /// Clarify-marker detection on raw SSE-era JSON payload blobs (used by the
+    /// defensive stream-payload sniffing) still works on the current model.
+    func testClarificationMarkerParsingDetectsClarifyPayloads() {
+        XCTAssertTrue(ClarificationPendingResponse.containsClarificationMarkers(
+            in: Data(#"{"pending":{"question":"Which?"}}"#.utf8)
+        ))
+        XCTAssertTrue(ClarificationPendingResponse.containsClarificationMarkers(
+            in: Data(#"{"question":"Which?","choices_offered":["A","B"]}"#.utf8)
+        ))
+        XCTAssertFalse(ClarificationPendingResponse.containsClarificationMarkers(
+            in: Data(#"{"pending": null}"#.utf8)
+        ))
+        XCTAssertFalse(ClarificationPendingResponse.containsClarificationMarkers(
+            in: Data(#"{"ok": true}"#.utf8)
+        ))
     }
 
     @MainActor
-    func testChatViewModelClarificationStreamPublishesPromptAndResponds() async throws {
-        let streamClient = ClarificationSpySSEStreamingClient()
-        let approvalStreamClient = ClarificationSpySSEStreamingClient()
-        let clarifyStreamClient = ClarificationSpySSEStreamingClient()
-        var respondBody: [String: Any]?
-        var didFetchPendingAfterResponse = false
-        let viewModel = try makeViewModel(
-            streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient
-        ) { request in
-            switch request.url?.path {
-            case "/api/chat/start":
-                return jsonResponse(#"{"session_id": "session-abc", "stream_id": "stream-123"}"#, for: request)
-            case "/api/clarify/respond":
-                respondBody = try XCTUnwrap(jsonBody(from: request))
-                return jsonResponse(#"{"ok": true, "response": "Use main"}"#, for: request)
-            case "/api/clarify/pending":
-                didFetchPendingAfterResponse = true
-                return jsonResponse(#"{"pending": null}"#, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
+    func testClarificationEventPublishesPrompt() async throws {
+        let fabricator = ScriptedGatewayFabricator()
+        let viewModel = try makeViewModel(gatewayFabricator: fabricator.fabricator) { request in
+            XCTAssertEqual(request.url?.path, "/api/auth/ws-ticket")
+            return apiTestJSONResponse(#"{"ticket": "ticket-1"}"#, for: request)
         }
 
-        let didStart = await viewModel.sendMessage("Continue")
-
+        let didStart = await viewModel.sendMessage("Set up the project")
         XCTAssertTrue(didStart)
-        XCTAssertEqual(streamClient.startedURLs.first?.path, "/api/chat/stream")
-        XCTAssertEqual(approvalStreamClient.startedURLs.first?.path, "/api/approval/stream")
-        XCTAssertEqual(clarifyStreamClient.startedURLs.first?.path, "/api/clarify/stream")
-        XCTAssertEqual(
-            URLComponents(url: try XCTUnwrap(clarifyStreamClient.startedURLs.first), resolvingAgainstBaseURL: false)?
-                .queryItems?
-                .first(where: { $0.name == "session_id" })?
-                .value,
-            "session-abc"
-        )
+        let gateway = try XCTUnwrap(fabricator.latest)
 
-        clarifyStreamClient.emit(.clarificationPending(ClarificationPendingResponse(
-            pending: PendingClarification(
-                clarifyId: "clarify-1",
-                question: "Which branch?",
-                choicesOffered: ["main", "release"],
-                sessionId: "session-abc",
-                kind: "clarify",
-                requestedAt: 1_716_150_000,
-                timeoutSeconds: 120,
-                expiresAt: 1_716_150_120
-            ),
-            pendingCount: 1
-        )))
+        gateway.deliver(GatewayEventFixture.clarification(
+            sessionID: "session-abc",
+            requestID: "clarify-1",
+            question: "Which branch?",
+            choices: [("main", "main"), ("release", "release")]
+        ))
 
         XCTAssertEqual(viewModel.clarificationPrompt?.sessionID, "session-abc")
         XCTAssertEqual(viewModel.clarificationPrompt?.pending.clarifyId, "clarify-1")
         XCTAssertEqual(viewModel.clarificationPrompt?.question, "Which branch?")
         XCTAssertEqual(viewModel.clarificationPrompt?.choices, ["main", "release"])
-
-        await viewModel.respondToClarification("  Use main  ")
-
-        XCTAssertEqual(respondBody?["session_id"] as? String, "session-abc")
-        XCTAssertEqual(respondBody?["response"] as? String, "Use main")
-        XCTAssertEqual(respondBody?["clarify_id"] as? String, "clarify-1")
-        XCTAssertTrue(didFetchPendingAfterResponse)
-        XCTAssertNil(viewModel.clarificationPrompt)
-        XCTAssertEqual(streamClient.stopCount, 0)
-        XCTAssertEqual(viewModel.activeStreamID, "stream-123")
-    }
-
-    @MainActor
-    func testClarificationResponseFailureKeepsPromptAndPublishesActionError() async throws {
-        let streamClient = ClarificationSpySSEStreamingClient()
-        let approvalStreamClient = ClarificationSpySSEStreamingClient()
-        let clarifyStreamClient = ClarificationSpySSEStreamingClient()
-        let viewModel = try makeViewModel(
-            streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient
-        ) { request in
-            switch request.url?.path {
-            case "/api/chat/start":
-                return jsonResponse(#"{"session_id": "session-abc", "stream_id": "stream-123"}"#, for: request)
-            case "/api/clarify/respond":
-                throw URLError(.timedOut)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        let didStart = await viewModel.sendMessage("Continue")
-        XCTAssertTrue(didStart)
-        clarifyStreamClient.emit(.clarificationPending(ClarificationPendingResponse(
-            pending: PendingClarification(
-                clarifyId: "clarify-1",
-                question: "Which branch?",
-                sessionId: "session-abc"
-            ),
-            pendingCount: 1
-        )))
-
-        let didRespond = await viewModel.respondToClarification("Use main")
-
-        XCTAssertFalse(didRespond)
-        XCTAssertEqual(viewModel.clarificationPrompt?.pending.clarifyId, "clarify-1")
-        XCTAssertNotNil(viewModel.lastError)
-        XCTAssertEqual(viewModel.clarificationErrorMessage, viewModel.sendErrorMessage)
-        XCTAssertEqual(viewModel.activeStreamID, "stream-123")
+        XCTAssertEqual(viewModel.activeStreamID, "session-abc")
     }
 
     @MainActor
     func testClarificationForDifferentSessionDoesNotRenderOverCurrentChat() async throws {
-        let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            return jsonResponse(#"{"session_id": "session-abc", "stream_id": "stream-123"}"#, for: request)
+        let fabricator = ScriptedGatewayFabricator()
+        let viewModel = try makeViewModel(gatewayFabricator: fabricator.fabricator) { request in
+            XCTAssertEqual(request.url?.path, "/api/auth/ws-ticket")
+            return apiTestJSONResponse(#"{"ticket": "ticket-1"}"#, for: request)
         }
 
         let didStart = await viewModel.sendMessage("Continue")
@@ -328,29 +200,59 @@ final class ClarificationTests: XCTestCase {
         XCTAssertEqual(viewModel.clarificationPrompt?.pending.clarifyId, "current-clarify")
     }
 
+    /// The respond path now calls the gateway `clarify.respond` RPC (no REST
+    /// body to assert), so the reachable local contract is the guard: an
+    /// empty/whitespace-only response keeps the prompt and shows a validation
+    /// error without hitting the network.
+    @MainActor
+    func testEmptyClarificationRespondKeepsPromptAndShowsValidationError() async throws {
+        let fabricator = ScriptedGatewayFabricator()
+        let viewModel = try makeViewModel(gatewayFabricator: fabricator.fabricator) { request in
+            XCTAssertEqual(request.url?.path, "/api/auth/ws-ticket")
+            return apiTestJSONResponse(#"{"ticket": "ticket-1"}"#, for: request)
+        }
+
+        let didStart = await viewModel.sendMessage("Continue")
+        XCTAssertTrue(didStart)
+        let gateway = try XCTUnwrap(fabricator.latest)
+
+        gateway.deliver(GatewayEventFixture.clarification(
+            sessionID: "session-abc",
+            requestID: "clarify-1",
+            question: "Which branch?"
+        ))
+
+        XCTAssertNotNil(viewModel.clarificationPrompt)
+
+        let didRespond = await viewModel.respondToClarification("   ")
+
+        XCTAssertFalse(didRespond)
+        XCTAssertNotNil(viewModel.clarificationPrompt)
+        XCTAssertEqual(
+            viewModel.clarificationErrorMessage,
+            String(localized: "Enter a response before submitting.")
+        )
+        XCTAssertEqual(viewModel.activeStreamID, "session-abc")
+    }
+
     @MainActor
     private func makeViewModel(
-        streamClient: SSEStreamingClient? = nil,
-        approvalStreamClient: SSEStreamingClient? = nil,
-        clarifyStreamClient: SSEStreamingClient? = nil,
+        gatewayFabricator: @escaping @MainActor (URL, String, String?) -> any GatewayClientProviding,
         handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
     ) throws -> ChatViewModel {
-        ClarificationMockURLProtocol.requestHandler = handler
+        MockURLProtocol.requestHandler = handler
 
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [ClarificationMockURLProtocol.self]
+        configuration.protocolClasses = [MockURLProtocol.self]
         let urlSession = URLSession(configuration: configuration)
         let server = try XCTUnwrap(URL(string: "https://example.test"))
         let client = APIClient(baseURL: server, session: urlSession)
-        let session = try makeSession()
 
         return ChatViewModel(
-            session: session,
+            session: try makeSession(),
             server: server,
             client: client,
-            streamClient: streamClient ?? ClarificationSpySSEStreamingClient(),
-            approvalStreamClient: approvalStreamClient ?? ClarificationSpySSEStreamingClient(),
-            clarifyStreamClient: clarifyStreamClient ?? ClarificationSpySSEStreamingClient()
+            gatewayFabricator: gatewayFabricator
         )
     }
 
@@ -369,113 +271,4 @@ final class ClarificationTests: XCTestCase {
             """.utf8)
         )
     }
-
-    private func makeClient(
-        handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
-    ) -> APIClient {
-        ClarificationMockURLProtocol.requestHandler = handler
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [ClarificationMockURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-        return APIClient(baseURL: URL(string: "https://example.test")!, session: session)
-    }
-}
-
-private final class ClarificationSpySSEStreamingClient: SSEStreamingClient {
-    private(set) var startedURLs: [URL] = []
-    private(set) var stopCount = 0
-    private(set) var lastEventID: String?
-    private var onEvent: (@MainActor (SSEEvent) -> Void)?
-
-    func start(url: URL, onEvent: @escaping @MainActor (SSEEvent) -> Void) {
-        startedURLs.append(url)
-        lastEventID = nil
-        self.onEvent = onEvent
-    }
-
-    func stop() {
-        stopCount += 1
-    }
-
-    @MainActor
-    func emit(_ event: SSEEvent) {
-        onEvent?(event)
-    }
-}
-
-private final class ClarificationMockURLProtocol: URLProtocol {
-    static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
-
-    override class func canInit(with request: URLRequest) -> Bool {
-        true
-    }
-
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
-        request
-    }
-
-    override func startLoading() {
-        guard let handler = Self.requestHandler else {
-            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
-            return
-        }
-
-        do {
-            let (response, data) = try handler(request)
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
-            client?.urlProtocolDidFinishLoading(self)
-        } catch {
-            client?.urlProtocol(self, didFailWithError: error)
-        }
-    }
-
-    override func stopLoading() {}
-}
-
-private func jsonResponse(_ json: String, statusCode: Int = 200, for request: URLRequest) -> (HTTPURLResponse, Data) {
-    let url = request.url ?? URL(string: "https://example.test")!
-    let response = HTTPURLResponse(
-        url: url,
-        statusCode: statusCode,
-        httpVersion: nil,
-        headerFields: ["Content-Type": "application/json"]
-    )!
-    return (response, Data(json.utf8))
-}
-
-private func jsonBody(from request: URLRequest) throws -> [String: Any] {
-    let data = try XCTUnwrap(bodyData(from: request))
-    return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-}
-
-private func bodyData(from request: URLRequest) -> Data? {
-    if let httpBody = request.httpBody {
-        return httpBody
-    }
-
-    guard let stream = request.httpBodyStream else {
-        return nil
-    }
-
-    stream.open()
-    defer { stream.close() }
-
-    var data = Data()
-    let bufferSize = 1024
-    let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
-    defer { buffer.deallocate() }
-
-    while stream.hasBytesAvailable {
-        let count = stream.read(buffer, maxLength: bufferSize)
-        if count < 0 {
-            return nil
-        }
-        if count == 0 {
-            break
-        }
-        data.append(buffer, count: count)
-    }
-
-    return data
 }
