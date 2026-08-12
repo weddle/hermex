@@ -6,13 +6,18 @@ import UIKit
 import UniformTypeIdentifiers
 @testable import HermesMobile
 
+/// Session list + search contract tests for the native Hermes Agent dashboard
+/// REST surface: `GET /api/sessions` (archived/limit paging), `GET /api/sessions/search`
+/// (`q` + `limit`), and tolerant decoding of `NativeSessionRow` rows.
 final class APIClientSessionListTests: APIClientTestCase {
     func testSessionsDecodesSnakeCaseResponse() async throws {
         let client = makeClient { request in
             XCTAssertEqual(request.url?.path, "/api/sessions")
-            // The default fetch must stay parameterless so the main list request
-            // (and its server-side ordering) is unchanged (issue #17).
-            XCTAssertNil(request.url?.query)
+            // The native list pages by `archived` + `limit`; the default fetch
+            // excludes archived rows with a 100-row page.
+            let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
+            let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+            XCTAssertEqual(query, ["archived": "exclude", "limit": "100"])
 
             return apiTestJSONResponse("""
             {
@@ -21,15 +26,12 @@ final class APIClientSessionListTests: APIClientTestCase {
                   "session_id": "abc123",
                   "title": "Planning",
                   "message_count": 7,
-                  "last_message_at": 1770000000,
+                  "last_activity_at": 1770000000,
                   "pinned": true,
                   "archived": false
                 }
               ],
-              "cli_count": 2,
-              "archived_count": 8,
-              "server_time": 1770000001,
-              "server_tz": "-0400"
+              "total": 1
             }
             """, for: request)
         }
@@ -41,8 +43,7 @@ final class APIClientSessionListTests: APIClientTestCase {
         XCTAssertEqual(response.sessions?.first?.messageCount, 7)
         XCTAssertEqual(response.sessions?.first?.lastMessageAt, 1_770_000_000)
         XCTAssertEqual(response.sessions?.first?.pinned, true)
-        XCTAssertEqual(response.cliCount, 2)
-        XCTAssertEqual(response.archivedCount, 8)
+        XCTAssertEqual(response.archivedCount, 1)
     }
 
     func testSessionsDecodesDelegationAndReadOnlyMetadataTolerantly() async throws {
@@ -53,17 +54,15 @@ final class APIClientSessionListTests: APIClientTestCase {
               "sessions": [
                 {
                   "session_id": "subagent-child",
+                  "source": "subagent",
                   "source_tag": "subagent",
-                  "raw_source": "subagent",
-                  "session_source": "other",
-                  "source_label": "Subagent",
                   "parent_session_id": "parent-1",
                   "relationship_type": "child_session",
-                  "read_only": true
+                  "future_field": {"nested": true}
                 },
                 {
-                  "session_id": "legacy-read-only",
-                  "is_read_only": true
+                  "session_id": "legacy-row",
+                  "cwd": "/tmp/w"
                 },
                 {
                   "session_id": "older-server-row"
@@ -77,23 +76,28 @@ final class APIClientSessionListTests: APIClientTestCase {
         let sessions = try XCTUnwrap(response.sessions)
         let child = try XCTUnwrap(sessions.first)
 
+        // Native rows collapse source/source_label/raw_source into `source`.
         XCTAssertEqual(child.sourceTag, "subagent")
         XCTAssertEqual(child.rawSource, "subagent")
-        XCTAssertEqual(child.sessionSource, "other")
-        XCTAssertEqual(child.sourceLabel, "Subagent")
+        XCTAssertEqual(child.sessionSource, "subagent")
+        XCTAssertEqual(child.sourceLabel, "subagent")
         XCTAssertEqual(child.parentSessionId, "parent-1")
         XCTAssertEqual(child.relationshipType, "child_session")
-        XCTAssertEqual(child.readOnly, true)
-        XCTAssertNil(child.isReadOnly)
         XCTAssertTrue(child.isDelegatedSubagentSession)
+
+        // Delegated children are runner-owned and view-only.
         XCTAssertTrue(child.isSessionReadOnly)
 
-        XCTAssertTrue(sessions[1].isSessionReadOnly)
-        XCTAssertNil(sessions[2].sourceTag)
-        XCTAssertNil(sessions[2].parentSessionId)
+        // The native row does not carry a separate read_only flag for others.
         XCTAssertNil(sessions[2].readOnly)
         XCTAssertFalse(sessions[2].isDelegatedSubagentSession)
         XCTAssertFalse(sessions[2].isSessionReadOnly)
+
+        // Unknown keys are ignored; source/parent fields decode tolerantly as nil.
+        XCTAssertEqual(sessions[1].workspace, "/tmp/w")
+        XCTAssertNil(sessions[2].sourceTag)
+        XCTAssertNil(sessions[2].parentSessionId)
+        XCTAssertNil(sessions[2].relationshipType)
     }
 
     func testSessionsIncludeArchivedBuildsQueryAndDecodesMergedRows() async throws {
@@ -103,10 +107,10 @@ final class APIClientSessionListTests: APIClientTestCase {
 
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-            XCTAssertEqual(query, ["include_archived": "1", "archived_limit": "50"])
+            XCTAssertEqual(query, ["archived": "include", "limit": "50"])
 
-            // include_archived=1 merges archived rows into the visible list;
-            // each row carries an `archived` flag (upstream routes.py @312d3fab).
+            // Each row carries an `archived` flag; the server counts archived rows
+            // in `total` when requested with archived=include.
             return apiTestJSONResponse("""
             {
               "sessions": [
@@ -120,7 +124,8 @@ final class APIClientSessionListTests: APIClientTestCase {
                   "title": "Old research",
                   "archived": true
                 }
-              ]
+              ],
+              "total": 2
             }
             """, for: request)
         }
@@ -129,33 +134,33 @@ final class APIClientSessionListTests: APIClientTestCase {
 
         XCTAssertEqual(response.sessions?.compactMap(\.sessionId), ["visible-1", "archived-1"])
         XCTAssertEqual(response.sessions?.last?.archived, true)
-        // Tolerant decoding: an older server that omits archived_count still decodes.
-        XCTAssertNil(response.archivedCount)
+        // Tolerant decoding: a server that omits `total` still decodes.
+        XCTAssertEqual(response.archivedCount, 2)
     }
 
-    func testSessionSearchRequestBuildsExpectedQueryAndDecodesContentMatch() async throws {
+    func testSessionSearchRequestBuildsExpectedQueryAndDecodesResultRows() async throws {
         let client = makeClient { request in
             XCTAssertEqual(request.httpMethod, "GET")
             XCTAssertEqual(request.url?.path, "/api/sessions/search")
 
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+            // Native FTS5 search only pages by `q` + `limit`; `content`/`depth`
+            // knobs are ignored.
             XCTAssertEqual(query["q"], "billing plan")
-            XCTAssertEqual(query["content"], "1")
-            XCTAssertEqual(query["depth"], "5")
+            XCTAssertEqual(query["limit"], "20")
+            XCTAssertNil(query["content"])
+            XCTAssertNil(query["depth"])
 
             return apiTestJSONResponse("""
             {
-              "sessions": [
+              "results": [
                 {
                   "session_id": "content-123",
                   "title": "Planning",
-                  "match_type": "content",
                   "unexpected": "ignored"
                 }
-              ],
-              "query": "billing plan",
-              "count": 1
+              ]
             }
             """, for: request)
         }
@@ -165,22 +170,21 @@ final class APIClientSessionListTests: APIClientTestCase {
         XCTAssertEqual(response.query, "billing plan")
         XCTAssertEqual(response.count, 1)
         XCTAssertEqual(response.sessions?.first?.sessionId, "content-123")
-        XCTAssertEqual(response.sessions?.first?.matchType, "content")
+        XCTAssertNil(response.sessions?.first?.matchType)
     }
 
-    func testSessionSearchDecodesEmptyQueryResponseWithoutQueryOrCount() async throws {
+    func testSessionSearchDecodesEmptyQueryResponse() async throws {
         let client = makeClient { request in
             XCTAssertEqual(request.url?.path, "/api/sessions/search")
 
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
             XCTAssertEqual(query["q"], "")
-            XCTAssertEqual(query["content"], "1")
-            XCTAssertEqual(query["depth"], "5")
+            XCTAssertEqual(query["limit"], "20")
 
             return apiTestJSONResponse("""
             {
-              "sessions": [
+              "results": [
                 {
                   "session_id": "abc123",
                   "title": "Planning"
@@ -194,7 +198,7 @@ final class APIClientSessionListTests: APIClientTestCase {
 
         XCTAssertEqual(response.sessions?.first?.sessionId, "abc123")
         XCTAssertNil(response.sessions?.first?.matchType)
-        XCTAssertNil(response.query)
-        XCTAssertNil(response.count)
+        XCTAssertEqual(response.query, "")
+        XCTAssertEqual(response.count, 1)
     }
 }

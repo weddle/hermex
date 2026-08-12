@@ -27,39 +27,47 @@ private struct NativeSessionRow: Decodable, Equatable {
     let worktreePath: String?
     let inputTokens: Int?
     let outputTokens: Int?
-    let estimatedCost: Double?
+    let estimatedCostUsd: Double?
     let parentSessionId: String?
     let relationshipType: String?
     let source: String?
     let sourceTag: String?
     let isActive: Bool?
 
+    // NOTE: the shared `APIClient` decoder uses `.convertFromSnakeCase`, which
+    // re-derives every CodingKey's lookup key from its camelCase spelling. An
+    // explicit snake_case raw value like `case sessionId = "session_id"` is
+    // re-converted to `sessionId` and then silently fails to match the wire
+    // key. So these keys MUST keep the auto camelCase spelling (the strategy
+    // maps `session_id` → `sessionId`), with `estimatedCostUsd` matching the
+    // `estimated_cost_usd` wire field. Do not "fix" them back to explicit
+    // snake_case raw values.
     enum CodingKeys: String, CodingKey {
         case id
-        case sessionId = "session_id"
-        case sessionKey = "session_key"
+        case sessionId
+        case sessionKey
         case title
         case model
-        case modelProvider = "model_provider"
-        case messageCount = "message_count"
-        case startedAt = "started_at"
-        case updatedAt = "updated_at"
-        case lastActivityAt = "last_activity_at"
+        case modelProvider
+        case messageCount
+        case startedAt
+        case updatedAt
+        case lastActivityAt
         case pinned
         case archived
-        case projectId = "project_id"
+        case projectId
         case profile
-        case profileName = "profile_name"
+        case profileName
         case cwd
-        case worktreePath = "worktree_path"
-        case inputTokens = "input_tokens"
-        case outputTokens = "output_tokens"
-        case estimatedCost = "estimated_cost_usd"
-        case parentSessionId = "parent_session_id"
-        case relationshipType = "relationship_type"
+        case worktreePath
+        case inputTokens
+        case outputTokens
+        case estimatedCostUsd
+        case parentSessionId
+        case relationshipType
         case source
-        case sourceTag = "source_tag"
-        case isActive = "is_active"
+        case sourceTag
+        case isActive
     }
 
     init(from decoder: Decoder) throws {
@@ -83,7 +91,7 @@ private struct NativeSessionRow: Decodable, Equatable {
         worktreePath = container.decodeLossyStringIfPresent(forKey: .worktreePath)
         inputTokens = container.decodeLossyIntIfPresent(forKey: .inputTokens)
         outputTokens = container.decodeLossyIntIfPresent(forKey: .outputTokens)
-        estimatedCost = container.decodeLossyDoubleIfPresent(forKey: .estimatedCost)
+        estimatedCostUsd = container.decodeLossyDoubleIfPresent(forKey: .estimatedCostUsd)
         parentSessionId = container.decodeLossyStringIfPresent(forKey: .parentSessionId)
         relationshipType = container.decodeLossyStringIfPresent(forKey: .relationshipType)
         source = container.decodeLossyStringIfPresent(forKey: .source)
@@ -123,7 +131,7 @@ private struct NativeSessionRow: Decodable, Equatable {
             profile: resolvedProfile,
             inputTokens: inputTokens,
             outputTokens: outputTokens,
-            estimatedCost: estimatedCost,
+            estimatedCost: estimatedCostUsd,
             activeStreamId: nil,
             isStreaming: isActive == true ? nil : nil,
             isCliSession: nil,
@@ -173,7 +181,7 @@ private struct NativeSessionMessagesResponse: Decodable {
     let pagination: NativeMessagesPagination?
 
     enum CodingKeys: String, CodingKey {
-        case sessionId = "session_id"
+        case sessionId
         case messages
         case pagination
     }
@@ -560,7 +568,7 @@ extension SessionDetail {
             profile: native.resolvedProfile,
             inputTokens: native.inputTokens,
             outputTokens: native.outputTokens,
-            estimatedCost: native.estimatedCost,
+            estimatedCost: native.estimatedCostUsd,
             activeStreamId: nil,
             pendingUserMessage: nil,
             pendingAttachments: nil,

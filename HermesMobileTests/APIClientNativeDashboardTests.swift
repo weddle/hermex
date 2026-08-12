@@ -221,8 +221,8 @@ final class APIClientNativeDashboardTests: APIClientTestCase {
 
         let response = try await client.session(id: "session-abc", includeMessages: true)
 
-        XCTAssertEqual(requestedPaths, ["/api/sessions/session-abc", "/api/sessions/session-abc/messages"])
-        XCTAssertEqual(response.session?.sessionId, "session-abc")
+        XCTAssertEqual(requestedPaths, ["/api/sessions/session-abc", "/api/sessions/session-abc/messages"], "actual paths: \(requestedPaths)")
+        XCTAssertEqual(response.session?.sessionId, "session-abc", "actual session: \(String(describing: response.session)); paths: \(requestedPaths)")
         XCTAssertEqual(response.session?.title, "Planning")
         XCTAssertEqual(response.session?.messages?.count, 2)
     }
