@@ -102,11 +102,13 @@ final class APIClientConfigurationTests: APIClientTestCase {
 
     func testSaveDefaultModelBuildsExpectedBodyAndDecodesResponse() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/default-model")
+            XCTAssertEqual(request.url?.path, "/api/model/set")
             XCTAssertEqual(request.httpMethod, "POST")
 
             let data = try XCTUnwrap(apiTestBodyData(from: request))
             let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            XCTAssertEqual(body?["scope"] as? String, "main")
+            XCTAssertEqual(body?["provider"] as? String, "")
             XCTAssertEqual(body?["model"] as? String, "claude-sonnet-4")
             XCTAssertNil(body?["modelId"])
 
@@ -126,10 +128,12 @@ final class APIClientConfigurationTests: APIClientTestCase {
 
     func testSaveDefaultModelWithProviderQualifiedID() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/default-model")
+            XCTAssertEqual(request.url?.path, "/api/model/set")
 
             let data = try XCTUnwrap(apiTestBodyData(from: request))
             let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            XCTAssertEqual(body?["scope"] as? String, "main")
+            XCTAssertEqual(body?["provider"] as? String, "openai")
             XCTAssertEqual(body?["model"] as? String, "@openai:gpt-5.4")
 
             return apiTestJSONResponse("""
@@ -140,46 +144,9 @@ final class APIClientConfigurationTests: APIClientTestCase {
             """, for: request)
         }
 
-        let response = try await client.saveDefaultModel(model: "@openai:gpt-5.4")
+        let response = try await client.saveDefaultModel(model: "@openai:gpt-5.4", provider: "openai")
 
         XCTAssertEqual(response.model, "@openai:gpt-5.4")
-    }
-
-    func testCommandsBuildsExpectedPathAndDecodesTolerantMetadata() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/commands")
-            XCTAssertEqual(request.httpMethod, "GET")
-
-            return apiTestJSONResponse("""
-            {
-              "commands": [
-                {
-                  "name": "browser",
-                  "description": "Use browser tools",
-                  "category": "tools",
-                  "aliases": ["web"],
-                  "args_hint": "query",
-                  "subcommands": ["open"],
-                  "cli_only": "true",
-                  "gateway_only": 0,
-                  "future_field": "ignored"
-                },
-                {
-                  "name": "status"
-                }
-              ]
-            }
-            """, for: request)
-        }
-
-        let response = try await client.commands()
-
-        XCTAssertEqual(response.commands?.count, 2)
-        XCTAssertEqual(response.commands?.first?.name, "browser")
-        XCTAssertEqual(response.commands?.first?.argsHint, "query")
-        XCTAssertEqual(response.commands?.first?.aliases, ["web"])
-        XCTAssertEqual(response.commands?.first?.cliOnly, true)
-        XCTAssertEqual(response.commands?.last?.description, nil)
     }
 
     func testUpdateSessionModelBuildsExpectedBodyAndDecodesResponse() async throws {
@@ -222,55 +189,80 @@ final class APIClientConfigurationTests: APIClientTestCase {
 
     func testReasoningStatusBuildsExpectedPathAndDecodesEffort() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/reasoning")
+            XCTAssertEqual(request.url?.path, "/api/model/options")
             XCTAssertEqual(request.httpMethod, "GET")
             XCTAssertNil(request.httpBody)
 
+            // Native payload: capabilities.reasoning drives supportsReasoningEffort,
+            // and supported_efforts is the native effort vocabulary.
             return apiTestJSONResponse("""
             {
-              "show_reasoning": true,
-              "reasoning_effort": "high"
+              "model": "@openai:gpt-5.5",
+              "provider": "openai",
+              "providers": [
+                {
+                  "slug": "openai",
+                  "name": "OpenAI",
+                  "models": ["@openai:gpt-5.4", "@openai:gpt-5.5"],
+                  "capabilities": {
+                    "@openai:gpt-5.5": { "reasoning": true, "fast": true }
+                  }
+                }
+              ]
             }
             """, for: request)
         }
 
         let response = try await client.reasoning()
 
+        XCTAssertEqual(response.supportsReasoningEffort, true)
+        XCTAssertEqual(
+            Set(response.supportedEfforts ?? []),
+            ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+        )
+        XCTAssertEqual(response.effectiveEffort, nil)
         XCTAssertEqual(response.showReasoning, true)
-        XCTAssertEqual(response.reasoningEffort, "high")
-        XCTAssertEqual(response.effectiveEffort, "high")
-        XCTAssertNil(response.supportedEfforts)
-        XCTAssertNil(response.supportsReasoningEffort)
-        XCTAssertNil(response.normalizedSupportedEfforts)
     }
 
     func testReasoningStatusPassesModelProviderQueryAndDecodesSupportedEfforts() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/reasoning")
+            XCTAssertEqual(request.url?.path, "/api/model/options")
             XCTAssertEqual(request.httpMethod, "GET")
 
+            // No model/provider query is passed on the native retarget; the
+            // resolved assignment is carried in the body.
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
-            let query = Dictionary(
-                uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) }
-            )
-            XCTAssertEqual(query["model"], "gpt-5.4")
-            XCTAssertEqual(query["provider"], "openai")
+            XCTAssertTrue((components?.queryItems ?? []).isEmpty)
 
             return apiTestJSONResponse("""
             {
-              "show_reasoning": true,
-              "reasoning_effort": "medium",
-              "supported_efforts": ["minimal", "low", "medium", "high", "xhigh"],
-              "supports_reasoning_effort": true
+              "model": "gpt-5.4",
+              "provider": "openai",
+              "providers": [
+                {
+                  "slug": "openai",
+                  "name": "OpenAI",
+                  "models": ["gpt-5.4"],
+                  "capabilities": {
+                    "gpt-5.4": { "reasoning": true }
+                  }
+                }
+              ]
             }
             """, for: request)
         }
 
-        let response = try await client.reasoning(model: "gpt-5.4", provider: "openai")
+        let response = try await client.reasoning()
 
-        XCTAssertEqual(response.supportedEfforts, ["minimal", "low", "medium", "high", "xhigh"])
+        XCTAssertEqual(
+            Set(response.supportedEfforts ?? []),
+            ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+        )
         XCTAssertEqual(response.supportsReasoningEffort, true)
-        XCTAssertEqual(response.normalizedSupportedEfforts, ["minimal", "low", "medium", "high", "xhigh"])
+        XCTAssertEqual(
+            Set(response.normalizedSupportedEfforts ?? []),
+            ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+        )
     }
 
     func testReasoningStatusNormalizesSupportedEfforts() throws {
@@ -287,134 +279,6 @@ final class APIClientConfigurationTests: APIClientTestCase {
 
         XCTAssertEqual(response.normalizedSupportedEfforts, ["low", "high"])
         XCTAssertEqual(response.supportsReasoningEffort, false)
-    }
-
-    func testSaveReasoningEffortBuildsExpectedBodyAndDecodesResponse() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/reasoning")
-            XCTAssertEqual(request.httpMethod, "POST")
-
-            let data = try XCTUnwrap(apiTestBodyData(from: request))
-            let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            XCTAssertEqual(body?["effort"] as? String, "xhigh")
-
-            return apiTestJSONResponse("""
-            {
-              "ok": true,
-              "reasoning_effort": "xhigh"
-            }
-            """, for: request)
-        }
-
-        let response = try await client.saveReasoningEffort("xhigh")
-
-        XCTAssertEqual(response.ok, true)
-        XCTAssertEqual(response.effectiveEffort, "xhigh")
-    }
-
-    func testSaveReasoningDisplayBuildsExpectedBodyAndDecodesResponse() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/reasoning")
-            XCTAssertEqual(request.httpMethod, "POST")
-
-            let data = try XCTUnwrap(apiTestBodyData(from: request))
-            let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            XCTAssertEqual(body?["display"] as? String, "hide")
-            XCTAssertNil(body?["effort"])
-
-            return apiTestJSONResponse("""
-            {
-              "ok": true,
-              "show_reasoning": false,
-              "reasoning_effort": "medium"
-            }
-            """, for: request)
-        }
-
-        let response = try await client.saveReasoningDisplay("hide")
-
-        XCTAssertEqual(response.ok, true)
-        XCTAssertEqual(response.showReasoning, false)
-        XCTAssertEqual(response.effectiveEffort, "medium")
-    }
-
-    func testPersonalitiesBuildsExpectedPathAndDecodesResponse() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/personalities")
-            XCTAssertEqual(request.httpMethod, "GET")
-
-            return apiTestJSONResponse("""
-            {
-              "personalities": [
-                {
-                  "name": "mentor",
-                  "description": "Patient technical coach",
-                  "extra": "ignored"
-                },
-                {
-                  "name": "critic"
-                }
-              ]
-            }
-            """, for: request)
-        }
-
-        let response = try await client.personalities()
-
-        XCTAssertEqual(response.personalities?.count, 2)
-        XCTAssertEqual(response.personalities?.first?.name, "mentor")
-        XCTAssertEqual(response.personalities?.first?.description, "Patient technical coach")
-        XCTAssertEqual(response.personalities?.last?.description, nil)
-    }
-
-    func testSetPersonalityBuildsExpectedBodyAndDecodesResponse() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/personality/set")
-            XCTAssertEqual(request.httpMethod, "POST")
-
-            let data = try XCTUnwrap(apiTestBodyData(from: request))
-            let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            XCTAssertEqual(body?["session_id"] as? String, "session-abc")
-            XCTAssertEqual(body?["name"] as? String, "mentor")
-            XCTAssertNil(body?["sessionId"])
-
-            return apiTestJSONResponse("""
-            {
-              "ok": true,
-              "personality": "mentor",
-              "prompt": "Be direct."
-            }
-            """, for: request)
-        }
-
-        let response = try await client.setPersonality(sessionID: "session-abc", name: "mentor")
-
-        XCTAssertEqual(response.ok, true)
-        XCTAssertEqual(response.personality, "mentor")
-        XCTAssertEqual(response.prompt, "Be direct.")
-    }
-
-    func testClearPersonalitySendsEmptyName() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/personality/set")
-
-            let data = try XCTUnwrap(apiTestBodyData(from: request))
-            let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            XCTAssertEqual(body?["session_id"] as? String, "session-abc")
-            XCTAssertEqual(body?["name"] as? String, "")
-
-            return apiTestJSONResponse("""
-            {
-              "ok": true,
-              "personality": null
-            }
-            """, for: request)
-        }
-
-        let response = try await client.setPersonality(sessionID: "session-abc", name: "")
-
-        XCTAssertEqual(response.ok, true)
-        XCTAssertNil(response.personality)
     }
 
     func testRenameSessionBuildsExpectedBodyAndDecodesResponse() async throws {
@@ -445,12 +309,21 @@ final class APIClientConfigurationTests: APIClientTestCase {
 
     func testProfilesBuildsExpectedPathAndDecodesResponse() async throws {
         let client = makeClient { request in
+            if request.url?.path == "/api/profiles/active" {
+                XCTAssertEqual(request.httpMethod, "GET")
+                return apiTestJSONResponse("""
+                {
+                  "active": "default",
+                  "current": "default"
+                }
+                """, for: request)
+            }
+
             XCTAssertEqual(request.url?.path, "/api/profiles")
             XCTAssertEqual(request.httpMethod, "GET")
 
             return apiTestJSONResponse("""
             {
-              "active": "default",
               "profiles": [
                 {
                   "name": "default",
@@ -474,7 +347,6 @@ final class APIClientConfigurationTests: APIClientTestCase {
         XCTAssertEqual(response.profiles?.first?.name, "default")
         XCTAssertEqual(response.profiles?.first?.isDefault, true)
         XCTAssertEqual(response.profiles?.first?.displayName, "Default")
-        XCTAssertEqual(response.singleProfileMode, true)
     }
 
     func testProfilesResponseToleratesAbsentSingleProfileMode() throws {
@@ -562,56 +434,81 @@ final class APIClientConfigurationTests: APIClientTestCase {
     }
 
     func testSwitchProfileBuildsExpectedBodyAndDecodesResponse() async throws {
+        var requestCount = 0
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/profile/switch")
-            XCTAssertEqual(request.httpMethod, "POST")
+            requestCount += 1
 
-            let data = try XCTUnwrap(apiTestBodyData(from: request))
-            let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            XCTAssertEqual(body?["name"] as? String, "work")
+            if requestCount == 1 {
+                // POST /api/profiles/active {name}
+                XCTAssertEqual(request.url?.path, "/api/profiles/active")
+                XCTAssertEqual(request.httpMethod, "POST")
 
+                let data = try XCTUnwrap(apiTestBodyData(from: request))
+                let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                XCTAssertEqual(body?["name"] as? String, "work")
+
+                return apiTestJSONResponse("""
+                {
+                  "ok": true,
+                  "active": "work"
+                }
+                """, for: request)
+            }
+
+            if requestCount == 2 {
+                // GUI profiles reload.
+                XCTAssertEqual(request.url?.path, "/api/profiles")
+                XCTAssertEqual(request.httpMethod, "GET")
+
+                return apiTestJSONResponse("""
+                {
+                  "profiles": [
+                    {"name": "default", "path": "/Users/test/.hermes", "is_active": false},
+                    {"name": "work", "path": "/Users/test/.hermes/work", "is_active": true, "model": "gpt-5.5"}
+                  ]
+                }
+                """, for: request)
+            }
+
+            // Sticky active-profile lookup.
+            XCTAssertEqual(request.url?.path, "/api/profiles/active")
+            XCTAssertEqual(request.httpMethod, "GET")
             return apiTestJSONResponse("""
             {
               "active": "work",
-              "default_model": "gpt-5.5",
-              "default_workspace": "/Users/test/work",
-              "profiles": [
-                {"name": "default", "is_active": false},
-                {"name": "work", "is_active": true}
-              ]
+              "current": "work"
             }
             """, for: request)
         }
 
         let response = try await client.switchProfile(name: "work")
 
+        XCTAssertEqual(requestCount, 3)
         XCTAssertEqual(response.active, "work")
         XCTAssertEqual(response.defaultModel, "gpt-5.5")
-        XCTAssertEqual(response.defaultWorkspace, "/Users/test/work")
+        XCTAssertNil(response.defaultWorkspace)
         XCTAssertEqual(response.profiles?.last?.isActive, true)
     }
 
     func testCreateProfileBuildsExpectedBodyAndDecodesResponse() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/profile/create")
+            XCTAssertEqual(request.url?.path, "/api/profiles")
             XCTAssertEqual(request.httpMethod, "POST")
 
             let data = try XCTUnwrap(apiTestBodyData(from: request))
             let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             XCTAssertEqual(body?["name"] as? String, "research")
-            XCTAssertEqual(body?["clone_config"] as? Bool, false)
-            // Optional fields must be omitted, not sent as null (the server
-            // treats presence as intent).
+            XCTAssertEqual(body?["clone_from_default"] as? Bool, false)
+            // Optional provider/model must be omitted, not sent as null.
+            XCTAssertNil(body?["provider"])
+            XCTAssertNil(body?["model"])
             XCTAssertEqual(body?.count, 2)
 
             return apiTestJSONResponse("""
             {
               "ok": true,
-              "profile": {
-                "name": "research",
-                "path": "/Users/test/.hermes/profiles/research",
-                "is_default": false
-              }
+              "name": "research",
+              "path": "/Users/test/.hermes/profiles/research"
             }
             """, for: request)
         }
@@ -625,32 +522,29 @@ final class APIClientConfigurationTests: APIClientTestCase {
 
     func testCreateProfileSendsOptionalFieldsWithSnakeCaseKeys() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/profile/create")
+            XCTAssertEqual(request.url?.path, "/api/profiles")
 
             let data = try XCTUnwrap(apiTestBodyData(from: request))
             let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             XCTAssertEqual(body?["name"] as? String, "research")
-            XCTAssertEqual(body?["clone_config"] as? Bool, true)
-            XCTAssertEqual(body?["default_model"] as? String, "claude-sonnet-4-5")
-            XCTAssertEqual(body?["model_provider"] as? String, "anthropic")
-            XCTAssertEqual(body?["base_url"] as? String, "http://localhost:11434")
-            XCTAssertEqual(body?["api_key"] as? String, "sk-test")
-            XCTAssertEqual(body?.count, 6)
+            XCTAssertEqual(body?["clone_from_default"] as? Bool, true)
+            XCTAssertEqual(body?["provider"] as? String, "anthropic")
+            XCTAssertEqual(body?["model"] as? String, "claude-sonnet-4-5")
+            XCTAssertNil(body?["clone_from"])
+            XCTAssertEqual(body?.count, 4)
 
-            return apiTestJSONResponse(#"{"ok": true}"#, for: request)
+            return apiTestJSONResponse(#"{"ok": true, "name": "research"}"#, for: request)
         }
 
         let response = try await client.createProfile(
             name: "research",
             cloneConfig: true,
             defaultModel: "claude-sonnet-4-5",
-            modelProvider: "anthropic",
-            baseUrl: "http://localhost:11434",
-            apiKey: "sk-test"
+            modelProvider: "anthropic"
         )
 
         XCTAssertEqual(response.ok, true)
-        XCTAssertNil(response.profile)
+        XCTAssertEqual(response.profile?.name, "research")
     }
 
     func testProfileBaseURLRuleMirrorsUpstream() {
@@ -684,25 +578,5 @@ final class APIClientConfigurationTests: APIClientTestCase {
         XCTAssertFalse(ProfileNameRules.isValid("über"))
         XCTAssertFalse(ProfileNameRules.isValid("name!"))
         XCTAssertFalse(ProfileNameRules.isValid(String(repeating: "a", count: 65)))
-    }
-
-    func testSettingsBuildsExpectedPathAndDecodesServerVersion() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/settings")
-
-            return apiTestJSONResponse("""
-            {
-              "bot_name": "Hermes",
-              "webui_version": "v0.50.253",
-              "theme": "system"
-            }
-            """, for: request)
-        }
-
-        let response = try await client.settings()
-
-        XCTAssertEqual(response.botName, "Hermes")
-        XCTAssertEqual(response.webuiVersion, "v0.50.253")
-        XCTAssertEqual(response.theme, "system")
     }
 }
