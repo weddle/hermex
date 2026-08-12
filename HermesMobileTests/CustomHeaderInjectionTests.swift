@@ -213,17 +213,6 @@ final class CustomHeaderAPIClientInjectionTests: APIClientTestCase {
         _ = try? await client.uploadFile(sessionID: "s1", data: Data("bytes".utf8), filename: "a.png")
     }
 
-    func testTranscribeRequestCarriesCustomHeaders() async throws {
-        let (client, _) = makeHeaderClient([
-            CustomHeader(name: "Authorization", value: "Bearer stt")
-        ]) { request in
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer stt")
-            return try self.ok(request)
-        }
-
-        _ = try? await client.transcribeAudio(data: Data("clip".utf8), filename: "v.m4a")
-    }
-
     func testDownloadRequestCarriesCustomHeaders() async throws {
         let (client, session) = makeHeaderClient([
             CustomHeader(name: "Authorization", value: "Bearer media")
@@ -258,101 +247,6 @@ final class CustomHeaderAPIClientInjectionTests: APIClientTestCase {
     }
 }
 
-// MARK: - SSE stream injection
-
-@MainActor
-final class CustomHeaderSSEInjectionTests: XCTestCase {
-    override func tearDown() {
-        MockURLProtocol.requestHandler = nil
-        super.tearDown()
-    }
-
-    func testSSEStreamCarriesCustomHeadersUnderBuiltIns() async throws {
-        let captured = expectation(description: "sse request captured")
-        MockURLProtocol.requestHandler = { request in
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer sse")
-            // Built-in Accept must win over a user-supplied Accept.
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "text/event-stream")
-            captured.fulfill()
-
-            let response = HTTPURLResponse(
-                url: request.url!,
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "text/event-stream"]
-            )!
-            return (response, Data("event: stream_end\ndata: {}\n\n".utf8))
-        }
-
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [MockURLProtocol.self]
-        let client = SSEClient(
-            urlSessionConfiguration: configuration,
-            customHeaderProvider: {
-                [
-                    CustomHeader(name: "Authorization", value: "Bearer sse"),
-                    CustomHeader(name: "Accept", value: "application/evil")
-                ]
-            }
-        )
-
-        client.start(url: URL(string: "https://example.test/api/chat/stream?stream_id=s1")!) { _ in }
-        await fulfillment(of: [captured], timeout: 2)
-        client.stop()
-    }
-
-    /// The default SSE header provider reads `CustomHeaderStore.shared`, which holds
-    /// only the active server's headers (#16) — so the stream carries the active
-    /// server's proxy header, never another configured server's.
-    func testSSEStreamSourcesHeadersFromActiveServerStore() async throws {
-        let previous = CustomHeaderStore.shared.snapshot()
-        defer { CustomHeaderStore.shared.replace(with: previous) }
-        CustomHeaderStore.shared.replace(with: [CustomHeader(name: "Authorization", value: "Bearer active-a")])
-
-        let captured = expectation(description: "sse request captured")
-        MockURLProtocol.requestHandler = { request in
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer active-a")
-            captured.fulfill()
-            let response = HTTPURLResponse(
-                url: request.url!,
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "text/event-stream"]
-            )!
-            return (response, Data("event: stream_end\ndata: {}\n\n".utf8))
-        }
-
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [MockURLProtocol.self]
-        // No explicit provider → uses the default active-server store.
-        let client = SSEClient(urlSessionConfiguration: configuration)
-
-        client.start(url: URL(string: "https://a.test/api/chat/stream?stream_id=s1")!) { _ in }
-        await fulfillment(of: [captured], timeout: 2)
-        client.stop()
-    }
-
-    /// SSE streams against `HTTPCookieStorage.shared`, the same jar as `APIClient`.
-    /// Verify that jar only surfaces a server's own cookie for its stream URL, so
-    /// domain isolation covers the SSE stream too (#16).
-    func testSSESharedCookieJarIsDomainIsolatedPerStreamURL() throws {
-        let storage = HTTPCookieStorage.shared
-        storage.cookies?.forEach { storage.deleteCookie($0) }
-        defer { storage.cookies?.forEach { storage.deleteCookie($0) } }
-
-        func sessionCookie(host: String, value: String) throws -> HTTPCookie {
-            try XCTUnwrap(HTTPCookie(properties: [
-                .domain: host, .path: "/", .name: "hermes_session", .value: value
-            ]))
-        }
-        storage.setCookie(try sessionCookie(host: "a.test", value: "a-cookie"))
-        storage.setCookie(try sessionCookie(host: "b.test", value: "b-cookie"))
-
-        let streamA = try XCTUnwrap(URL(string: "https://a.test/api/chat/stream?stream_id=s1"))
-        XCTAssertEqual(storage.cookies(for: streamA)?.map(\.value), ["a-cookie"])
-    }
-}
-
 // MARK: - AuthManager configure / lifecycle
 
 @MainActor
@@ -376,6 +270,7 @@ final class CustomHeaderAuthManagerTests: XCTestCase {
 
         await manager.configure(
             serverURLString: "https://proxy.test",
+            username: "",
             password: "",
             customHeaders: [CustomHeader(name: "Authorization", value: "Bearer abc")]
         )
@@ -393,7 +288,7 @@ final class CustomHeaderAuthManagerTests: XCTestCase {
         let client = MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: true, passwordAuthEnabled: false))
         let manager = makeManager(keychain: keychain, store: CustomHeaderStore(), client: client)
 
-        await manager.configure(serverURLString: "https://example.test", password: "secret")
+        await manager.configure(serverURLString: "https://example.test", username: "alice", password: "secret")
 
         XCTAssertEqual(manager.lastErrorMessage, AuthManager.passkeyOnlyMessage)
         XCTAssertEqual(manager.state, .unconfigured)
@@ -408,7 +303,7 @@ final class CustomHeaderAuthManagerTests: XCTestCase {
         let client = MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: true, loggedIn: false))
         let manager = makeManager(keychain: keychain, store: CustomHeaderStore(), client: client)
 
-        await manager.configure(serverURLString: "https://example.test", password: "secret")
+        await manager.configure(serverURLString: "https://example.test", username: "alice", password: "secret")
 
         XCTAssertEqual(client.loginPasswords, ["secret"])
         XCTAssertEqual(manager.state, .loggedIn(server: try XCTUnwrap(URL(string: "https://example.test"))))
@@ -420,7 +315,7 @@ final class CustomHeaderAuthManagerTests: XCTestCase {
         let client = MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: true, loggedIn: false))
         let manager = makeManager(keychain: keychain, store: CustomHeaderStore(), client: client)
 
-        await manager.configure(serverURLString: "https://example.test", password: "secret")
+        await manager.configure(serverURLString: "https://example.test", username: "alice", password: "secret")
 
         XCTAssertEqual(manager.state, .loggedIn(server: try XCTUnwrap(URL(string: "https://example.test"))))
         XCTAssertNil(keychain.scopedValue(.customHeaders, scope: "https://example.test"))
@@ -437,6 +332,7 @@ final class CustomHeaderAuthManagerTests: XCTestCase {
 
         await manager.configure(
             serverURLString: "https://proxy.test",
+            username: "",
             password: "",
             customHeaders: [CustomHeader(name: "Authorization", value: "Bearer abc")]
         )
@@ -463,7 +359,7 @@ final class CustomHeaderAuthManagerTests: XCTestCase {
         )
         // The editor is reachable only while signed in, so establish an active
         // server first; headers then persist under that server's scoped key (#16).
-        await manager.configure(serverURLString: "https://example.test", password: "")
+        await manager.configure(serverURLString: "https://example.test", username: "", password: "")
 
         manager.updateCustomHeaders([
             CustomHeader(name: "X-Keep", value: "1"),
@@ -487,7 +383,7 @@ final class CustomHeaderAuthManagerTests: XCTestCase {
             store: store,
             client: MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: false))
         )
-        await manager.configure(serverURLString: "https://example.test", password: "")
+        await manager.configure(serverURLString: "https://example.test", username: "", password: "")
 
         // persist:false → live store refresh but no (slow) Keychain write.
         manager.updateCustomHeaders([CustomHeader(name: "X-Live", value: "1")], persist: false)

@@ -36,18 +36,18 @@ final class SlashCommandExecutorTests: XCTestCase {
         XCTAssertEqual(alias?.args, "Planning Copy")
     }
 
-    func testParseUndoWithoutArgs() {
-        let parsed = SlashCommandExecutor.parse("/undo")
-        XCTAssertEqual(parsed?.command?.name, "undo")
-        XCTAssertEqual(parsed?.name, "undo")
-        XCTAssertEqual(parsed?.args, "")
-    }
+    func testParseUndoRetryAreUnknownAfterWebUIControlRemoval() {
+        // Undo/retry were WebUI-only controls with no native dashboard
+        // equivalent; they no longer resolve to catalog commands.
+        let undo = SlashCommandExecutor.parse("/undo")
+        XCTAssertNil(undo?.command)
+        XCTAssertEqual(undo?.name, "undo")
+        XCTAssertEqual(undo?.args, "")
 
-    func testParseRetryWithoutArgs() {
-        let parsed = SlashCommandExecutor.parse("/retry")
-        XCTAssertEqual(parsed?.command?.name, "retry")
-        XCTAssertEqual(parsed?.name, "retry")
-        XCTAssertEqual(parsed?.args, "")
+        let retry = SlashCommandExecutor.parse("/retry")
+        XCTAssertNil(retry?.command)
+        XCTAssertEqual(retry?.name, "retry")
+        XCTAssertEqual(retry?.args, "")
     }
 
     func testParseCompressWithFocus() {
@@ -70,16 +70,12 @@ final class SlashCommandExecutorTests: XCTestCase {
         XCTAssertEqual(parsed?.args, "claude")
     }
 
-    func testParseGoalWithActionOrText() {
-        let status = SlashCommandExecutor.parse("/goal status")
-        XCTAssertEqual(status?.command?.name, "goal")
-        XCTAssertEqual(status?.command?.handler, .serverSide(.goal))
-        XCTAssertEqual(status?.name, "goal")
-        XCTAssertEqual(status?.args, "status")
-
-        let text = SlashCommandExecutor.parse("/goal ship the next build")
-        XCTAssertEqual(text?.command?.name, "goal")
-        XCTAssertEqual(text?.args, "ship the next build")
+    func testParseGoalIsUnknownAfterRemoval() {
+        // Goals were WebUI-only with no native dashboard equivalent.
+        let parsed = SlashCommandExecutor.parse("/goal status")
+        XCTAssertNil(parsed?.command)
+        XCTAssertEqual(parsed?.name, "goal")
+        XCTAssertEqual(parsed?.args, "status")
     }
 
     func testParseUnknownCommand() {
@@ -108,7 +104,7 @@ final class SlashCommandExecutorTests: XCTestCase {
     }
 
     func testParseBusyInputCommands() {
-        for name in ["queue", "steer", "interrupt", "status", "btw", "background", "bg", "goal"] {
+        for name in ["queue", "steer", "interrupt", "status"] {
             let parsed = SlashCommandExecutor.parse("/\(name)")
             XCTAssertEqual(parsed?.command?.name, name)
             XCTAssertEqual(parsed?.name, name)
@@ -119,9 +115,16 @@ final class SlashCommandExecutorTests: XCTestCase {
         XCTAssertEqual(SlashCommandExecutor.parse("/steer prefer tests")?.command?.handler, .serverSide(.steer))
         XCTAssertEqual(SlashCommandExecutor.parse("/interrupt start over")?.command?.handler, .serverSide(.interrupt))
         XCTAssertEqual(SlashCommandExecutor.parse("/status")?.command?.handler, .serverSide(.status))
-        XCTAssertEqual(SlashCommandExecutor.parse("/btw explain this")?.command?.handler, .serverSide(.btw))
-        XCTAssertEqual(SlashCommandExecutor.parse("/background audit this")?.command?.handler, .serverSide(.background))
-        XCTAssertEqual(SlashCommandExecutor.parse("/bg audit this")?.command?.handler, .serverSide(.background))
+    }
+
+    func testParseWebUISideTaskCommandsAreUnknownAfterRemoval() {
+        // btw/background/bg were WebUI-only side-task commands with no native
+        // dashboard equivalent; they no longer resolve to catalog commands.
+        for name in ["btw", "background", "bg"] {
+            let parsed = SlashCommandExecutor.parse("/\(name)")
+            XCTAssertNil(parsed?.command, "\(name) must not resolve after removal")
+            XCTAssertEqual(parsed?.name, name)
+        }
     }
 
     func testEmptyArgsHandlingTrimsWhitespace() {

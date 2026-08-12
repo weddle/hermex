@@ -380,7 +380,7 @@ final class ServerRegistryTests: XCTestCase {
             serverRegistry: registry
         )
 
-        await manager.configure(serverURLString: "example.test", password: "")
+        await manager.configure(serverURLString: "example.test", username: "", password: "")
 
         XCTAssertEqual(registry.activeServer?.urlString, "https://example.test")
     }
@@ -393,7 +393,7 @@ final class ServerRegistryTests: XCTestCase {
             clientFactory: { _ in MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: false, loggedIn: false)) },
             serverRegistry: registry
         )
-        await manager.configure(serverURLString: "example.test", password: "")
+        await manager.configure(serverURLString: "example.test", username: "", password: "")
 
         await manager.signOut()
 
@@ -409,7 +409,7 @@ final class ServerRegistryTests: XCTestCase {
             clientFactory: { _ in MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: false, loggedIn: false)) },
             serverRegistry: registry
         )
-        await manager.configure(serverURLString: "example.test", password: "")
+        await manager.configure(serverURLString: "example.test", username: "", password: "")
 
         // A stale session cookie must not forget the server (re-login keeps it).
         manager.handleAPIError(APIError.unauthorized)
