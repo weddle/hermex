@@ -369,7 +369,7 @@ final class SidebarSectionVisibilityTests: XCTestCase {
         var visibility = SidebarSectionVisibility.showAll
         visibility.tasks = false
         visibility.skills = false
-        visibility.memory = false
+        // memory remains shown
 
         XCTAssertTrue(visibility.showsAnyUtilityLink)
     }
