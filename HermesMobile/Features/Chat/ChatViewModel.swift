@@ -182,10 +182,8 @@ final class ChatViewModel {
     private(set) var responseCompletionHapticTrigger = 0
     private(set) var responseCompletionNeedsTranscriptRefresh = false
     private(set) var modelCatalogGroups: [ModelCatalogGroup] = []
-    private(set) var agentCommands: [AgentCommand] = []
     private(set) var workspaceRoots: [WorkspaceRoot] = []
     private(set) var workspaceSuggestions: [String] = []
-    private(set) var personalitySuggestions: [String] = ["none"]
     private(set) var skillSlashSuggestions: [SkillSlashSuggestion] = []
     private(set) var profileOptions: [ProfileSummary] = []
     private(set) var isSingleProfileMode = false
@@ -260,8 +258,6 @@ final class ChatViewModel {
     private var hasCompletedCurrentResponse: Bool { streamCoordinator.hasCompletedCurrentResponse }
     private var isStreamConnectionSuspended: Bool { streamCoordinator.isConnectionSuspended }
     var isActiveStreamConnectionSuspended: Bool { streamCoordinator.isConnectionSuspended }
-    private var hasLoadedPersonalitySuggestions = false
-    private var isLoadingPersonalitySuggestions = false
     private var hasLoadedSkillSlashSuggestions = false
     private var isLoadingSkillSlashSuggestions = false
     private var queuedSlashMessages: [QueuedSlashMessage] = []
@@ -543,19 +539,21 @@ final class ChatViewModel {
         } while needsComposerConfigurationReload
     }
 
-    /// Refreshes the model catalog when a picker opens: refetch `/api/models`
-    /// (so the sheet stops pinning the chat-load-time snapshot), then overlay
-    /// the active provider's live list from `/api/models/live`. Failures are
-    /// silent by design — the picker keeps whatever it already shows.
+    /// Refreshes the model catalog when a picker opens: refetch `/api/model/options`
+    /// (so the sheet stops pinning the chat-load-time snapshot), then overlay the
+    /// active provider's live list from the refresh variant. Failures are silent
+    /// by design — the picker keeps whatever it already shows.
     func refreshModelCatalogForPickerOpen() async {
-        if let response = try? await client.models() {
+        let profile = requestProfileName
+
+        if let response = try? await client.models(profile: profile) {
             let groups = response.catalogGroups
             if !groups.isEmpty {
                 modelCatalogGroups = groups
             }
         }
 
-        if let live = try? await client.modelsLive() {
+        if let live = try? await client.modelsLive(profile: profile) {
             modelCatalogGroups = modelCatalogGroups.mergingLiveModels(from: live)
         }
     }
@@ -571,7 +569,6 @@ final class ChatViewModel {
             supportedReasoningEfforts: supportedReasoningEfforts,
             supportsReasoningEffort: supportsReasoningEffort,
             modelCatalogGroups: modelCatalogGroups,
-            agentCommands: agentCommands,
             workspaceRoots: workspaceRoots,
             workspaceSuggestions: workspaceSuggestions,
             profileOptions: profileOptions,
@@ -589,7 +586,6 @@ final class ChatViewModel {
         supportedReasoningEfforts = state.supportedReasoningEfforts
         supportsReasoningEffort = state.supportsReasoningEffort
         modelCatalogGroups = state.modelCatalogGroups
-        agentCommands = state.agentCommands
         workspaceRoots = state.workspaceRoots
         workspaceSuggestions = state.workspaceSuggestions
         profileOptions = state.profileOptions
@@ -650,23 +646,19 @@ final class ChatViewModel {
         }
     }
 
-    /// Re-queries `GET /api/reasoning` for the current model/provider and updates
-    /// the effort gating (issue #18). Failures are silent to the user, but reset
-    /// the gating to the "unknown" fallback (static effort list, control shown) —
-    /// keeping the previous model's gating after a successful model switch could
-    /// hide the control for a model that supports it, or offer efforts the new
-    /// model rejects. If the selected effort is no longer supported, snaps to the
-    /// server's coerced `reasoning_effort`.
+    /// Re-queries the reasoning gating for the current profile via the native
+    /// model/options capabilities and updates the effort gating (issue #18).
+    /// Failures are silent to the user, but reset the gating to the "unknown"
+    /// fallback (static effort list, control shown) — keeping the previous
+    /// model's gating after a successful model switch could hide the control for
+    /// a model that supports it, or offer efforts the new model rejects.
     func refreshReasoningEffortGating() async {
         guard !isViewingCachedData else { return }
 
         reasoningGatingFetchToken += 1
         let token = reasoningGatingFetchToken
 
-        guard let response = try? await client.reasoning(
-            model: Self.nonEmpty(currentModel),
-            provider: Self.nonEmpty(currentModelProvider)
-        ) else {
+        guard let response = try? await client.reasoning(profile: requestProfileName) else {
             if token == reasoningGatingFetchToken {
                 supportedReasoningEfforts = nil
                 supportsReasoningEffort = nil
@@ -676,15 +668,8 @@ final class ChatViewModel {
 
         guard token == reasoningGatingFetchToken else { return }
 
-        supportedReasoningEfforts = response.normalizedSupportedEfforts
-        supportsReasoningEffort = response.supportsReasoningEffort
-
-        if let selected = Self.nonEmpty(selectedReasoningEffort)?.lowercased(),
-           let supported = supportedReasoningEfforts,
-           !supported.contains(selected),
-           let serverEffort = Self.nonEmpty(response.effectiveEffort) {
-            selectedReasoningEffort = serverEffort
-        }
+        supportedReasoningEfforts = response.normalizedSupportedEfforts ?? supportedReasoningEfforts
+        supportsReasoningEffort = response.supportsReasoningEffort ?? supportsReasoningEffort
     }
 
     /// Refetches the workspace registry after the manager sheet mutated it
@@ -713,25 +698,6 @@ final class ChatViewModel {
         } catch {
             lastError = error
             composerConfigurationErrorMessage = error.localizedDescription
-        }
-    }
-
-    func loadPersonalitySuggestions() async {
-        guard !hasLoadedPersonalitySuggestions else { return }
-        guard !isLoadingPersonalitySuggestions else { return }
-
-        isLoadingPersonalitySuggestions = true
-        defer { isLoadingPersonalitySuggestions = false }
-
-        do {
-            personalitySuggestions = (try await client.personalities()).slashAutocompleteNames
-            hasLoadedPersonalitySuggestions = true
-        } catch {
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
-            if personalitySuggestions.isEmpty {
-                personalitySuggestions = ["none"]
-            }
         }
     }
 
@@ -894,8 +860,8 @@ final class ChatViewModel {
         defer { isUpdatingComposerConfiguration = false }
 
         do {
-            let response = try await client.saveReasoningEffort(selectedEffort)
-            selectedReasoningEffort = response.effectiveEffort ?? selectedEffort
+            let response = try await client.saveReasoningEffort(selectedEffort, profile: requestProfileName)
+            selectedReasoningEffort = response.effectiveEffort ?? response.reasoningEffort ?? selectedEffort
             return true
         } catch {
             lastError = error
@@ -2084,8 +2050,6 @@ final class ChatViewModel {
             return await switchReasoningFromSlashCommand(args)
         case .title:
             return await renameSessionFromSlashCommand(args)
-        case .personality:
-            return await setPersonalityFromSlashCommand(args)
         case .skills:
             return await searchSkillsFromSlashCommand(args)
         case .branch:
@@ -2311,10 +2275,10 @@ final class ChatViewModel {
 
         do {
             if Self.reasoningDisplayArgs.contains(reasoning) {
-                _ = try await client.saveReasoningDisplay(reasoning)
+                _ = try await client.saveReasoningDisplay(reasoning, profile: requestProfileName)
             } else if Self.reasoningEffortArgs.contains(reasoning) {
-                let response = try await client.saveReasoningEffort(reasoning)
-                selectedReasoningEffort = response.effectiveEffort ?? reasoning
+                let response = try await client.saveReasoningEffort(reasoning, profile: requestProfileName)
+                selectedReasoningEffort = response.effectiveEffort ?? response.reasoningEffort ?? reasoning
             } else {
                 return .unsupported(friendlyMessage: String(localized: "Unknown reasoning level: \(reasoning)."))
             }
@@ -2350,66 +2314,6 @@ final class ChatViewModel {
             }
             displayTitle = Self.displayTitle(from: response.session?.title ?? title)
             return .executed(message: String(localized: "Title set to **\(displayTitle)**."))
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
-    }
-
-    private func setPersonalityFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        let requestedPersonality = args.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !requestedPersonality.isEmpty else {
-            return await personalityListMessage()
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        guard activeStreamID == nil else {
-            return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before changing personality."))
-        }
-
-        let normalized = requestedPersonality.lowercased()
-        let name = Self.personalityClearArgs.contains(normalized) ? "" : requestedPersonality
-
-        lastError = nil
-        sendErrorMessage = nil
-
-        do {
-            let response = try await client.setPersonality(sessionID: sessionID, name: name)
-            if let error = response.error {
-                return .unsupported(friendlyMessage: error)
-            }
-
-            if name.isEmpty || response.personality == nil {
-                return .executed(message: String(localized: "Personality cleared."))
-            }
-
-            return .executed(message: String(localized: "Personality set to **\(response.personality ?? name)**."))
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
-    }
-
-    private func personalityListMessage() async -> SlashCommandExecutionResult {
-        do {
-            let personalities = (try await client.personalities()).personalities ?? []
-            guard !personalities.isEmpty else {
-                return .executed(message: String(localized: "No personalities are configured on the server."))
-            }
-
-            let list = personalities.compactMap { personality -> String? in
-                guard let name = personality.name, !name.isEmpty else { return nil }
-                if let description = personality.description, !description.isEmpty {
-                    return "- **\(name)** - \(description)"
-                }
-                return "- **\(name)**"
-            }
-            .joined(separator: "\n")
-
-            return .executed(message: String(localized: "Available personalities:\n\n\(list)\n\nUse `/personality <name>` or `/personality none`."))
         } catch {
             lastError = error
             return .unsupported(friendlyMessage: error.localizedDescription)
@@ -3894,7 +3798,6 @@ final class ChatViewModel {
 
     private static let reasoningDisplayArgs: Set<String> = ["show", "hide", "on", "off"]
     private static let reasoningEffortArgs: Set<String> = ["none", "minimal", "low", "medium", "high", "xhigh"]
-    private static let personalityClearArgs: Set<String> = ["none", "default", "clear"]
 
     private static let slashCommandHelpText = String(localized: """
     Available mobile commands:
@@ -3907,7 +3810,6 @@ final class ChatViewModel {
     `/workspace <path>` - Switch this session's workspace.
     `/reasoning <level>` - Set reasoning display or effort.
     `/title <text>` - Rename this session.
-    `/personality <name>` - Set or clear this session's personality.
     `/skills [query]` - Search available skills.
     `/queue <message>` - Queue a message for the next turn.
     `/steer <message>` - Steer the active response.

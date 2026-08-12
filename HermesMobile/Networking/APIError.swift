@@ -10,7 +10,7 @@ enum APIError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidServerURL:
-            return String(localized: "Enter a valid server URL, for example https://hermes.yourdomain.com or http://<server-tailscale-ip>:8787.")
+            return String(localized: "Enter a valid server URL, for example https://hermes.yourdomain.com or http://<server-tailscale-ip>:9119.")
         case .network(let underlying):
             return Self.networkMessage(for: underlying)
         case .http(let statusCode, let body):
@@ -20,16 +20,16 @@ enum APIError: LocalizedError {
 
             switch statusCode {
             case -1:
-                return String(localized: "The server response could not be read. Check that the URL points to a Hermes Web UI server.")
+                return String(localized: "The server response could not be read. Check that the URL points to a Hermes Agent dashboard server.")
             case 400:
                 if let message = Self.serverErrorMessage(from: body) {
                     return String(localized: "The server rejected the request: \(message)")
                 }
                 return String(localized: "The server rejected the request.")
             case 403:
-                return String(localized: "The server refused access. Check the server password and permissions.")
+                return String(localized: "The server refused access. Check the server credentials and permissions.")
             case 404:
-                return String(localized: "The server endpoint was not found. Check that the URL points to a Hermes Web UI server.")
+                return String(localized: "The server endpoint was not found. Check that the URL points to a Hermes Agent dashboard server.")
             case 408:
                 return String(localized: "The server took too long to respond. Check that the Mac is awake and the server is running.")
             case 429:
@@ -37,7 +37,7 @@ enum APIError: LocalizedError {
             case 500:
                 return String(localized: "The Hermes server hit an internal error. Check the server logs, then try again.")
             case 502, 503, 504:
-                return String(localized: "The server or Cloudflare tunnel is unavailable. Check that the Mac is awake, hermes-webui is running, and the tunnel is connected.")
+                return String(localized: "The server or tunnel is unavailable. Check that the Mac is awake, the Hermes Agent dashboard is running, and the tunnel is connected.")
             default:
                 if let message = Self.serverErrorMessage(from: body) {
                     return String(localized: "Server returned HTTP \(statusCode): \(message)")
@@ -47,7 +47,7 @@ enum APIError: LocalizedError {
         case .decoding:
             return String(localized: "The server response could not be read.")
         case .unauthorized:
-            return String(localized: "The password was rejected. Check the server password and try again.")
+            return String(localized: "The username or password was rejected. Check your credentials and try again.")
         }
     }
 
@@ -143,11 +143,11 @@ private extension APIError {
 
         switch urlError.code {
         case .timedOut:
-            return String(localized: "The server did not respond in time. Check that the Mac is awake, hermes-webui is running, and the tunnel is connected.")
+            return String(localized: "The server did not respond in time. Check that the Mac is awake, the Hermes Agent dashboard is running, and the tunnel is connected.")
         case .cannotFindHost, .dnsLookupFailed:
-            return String(localized: "Could not find that server. Check the URL and Cloudflare DNS hostname.")
+            return String(localized: "Could not find that server. Check the URL and DNS hostname.")
         case .cannotConnectToHost, .networkConnectionLost:
-            return String(localized: "Could not connect to the server. Check that hermes-webui is running and the tunnel is connected.")
+            return String(localized: "Could not connect to the server. Check that the Hermes Agent dashboard is running and the tunnel is connected.")
         case .notConnectedToInternet, .dataNotAllowed:
             return String(localized: "This device is offline. Connect to the internet, then try again.")
         case .secureConnectionFailed,

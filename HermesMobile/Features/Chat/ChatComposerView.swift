@@ -84,9 +84,7 @@ struct MessageComposerView: View {
     let workspaceRoots: [WorkspaceRoot]
     let selectedWorkspacePath: String?
     let workspaceSuggestions: [String]
-    let personalitySuggestions: [String]
     let skillSuggestions: [SkillSlashSuggestion]
-    let agentCommands: [AgentCommand]
     let profileOptions: [ProfileSummary]
     let isSingleProfileMode: Bool
     let selectedProfileName: String?
@@ -114,7 +112,6 @@ struct MessageComposerView: View {
     let onSelectModel: (ModelCatalogOption) -> Void
     let onModelPickerOpen: () async -> Void
     let onLoadWorkspaceSuggestions: (String) async -> Void
-    let onLoadPersonalitySuggestions: () async -> Void
     let onLoadSkillSuggestions: () async -> Void
     let onSelectWorkspace: (String) async -> Void
     let onSelectProfile: (ProfileSummary) -> Void
@@ -177,11 +174,6 @@ struct MessageComposerView: View {
             return false
         }
 
-        if AgentSlashCommandSuggestion.command(named: parsed.commandName, in: agentCommands) != nil,
-           hasWhitespaceAfterSlashCommand(parsed.commandName, in: String(query)) {
-            return false
-        }
-
         if parsed.commandName.lowercased() == "skills",
            SlashSkillFormatter.invocation(from: parsed.argQuery, suggestions: skillSuggestions) != nil {
             return false
@@ -215,8 +207,6 @@ struct MessageComposerView: View {
         switch command.subArgs {
         case .workspaces:
             return "workspace:\(parsedSlashQuery.argQuery)"
-        case .personalities:
-            return "personalities"
         case .skills:
             return "skills"
         case .models, .reasoningLevels, .none:
@@ -256,18 +246,13 @@ struct MessageComposerView: View {
                             modelGroups: modelGroups,
                             workspaceRoots: workspaceRoots,
                             workspaceSuggestions: workspaceSuggestions,
-                            personalitySuggestions: personalitySuggestions,
                             skillSuggestions: skillSuggestions,
-                            agentCommands: agentCommands,
                             selectedReasoningEffort: selectedReasoningEffort,
                             onSelectCommand: { command in
                                 draftMessage = "/\(command.name) "
                             },
                             onSelectSkillCommand: { skill in
                                 draftMessage = "/\(skill.slashName) "
-                            },
-                            onSelectAgentCommand: { command in
-                                draftMessage = "/\(command.name) "
                             },
                             onSelectSkillSubArg: { skill in
                                 draftMessage = "/skills \(skill.slashName) "
@@ -562,8 +547,6 @@ struct MessageComposerView: View {
         switch command.subArgs {
         case .workspaces:
             await onLoadWorkspaceSuggestions(parsedSlashQuery.argQuery)
-        case .personalities:
-            await onLoadPersonalitySuggestions()
         case .skills:
             await onLoadSkillSuggestions()
         case .models, .reasoningLevels, .none:

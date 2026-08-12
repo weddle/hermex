@@ -618,12 +618,18 @@ final class HermesGatewayClient {
         return try await rpc("model.options", params: params)
     }
 
-    func setConfig(sessionID: String, key: String, value: GatewayValue) async throws {
-        _ = try await rpc("config.set", params: [
+    func setConfig(sessionID: String, key: String, value: GatewayValue, global: Bool = false) async throws {
+        var params: [String: Any] = [
             "key": key,
-            "session_id": sessionID,
             "value": value
-        ])
+        ]
+        if !sessionID.isEmpty {
+            params["session_id"] = sessionID
+        }
+        if global {
+            params["scope"] = "global"
+        }
+        _ = try await rpc("config.set", params: params)
     }
 
     // MARK: - Attachments

@@ -30,18 +30,12 @@ enum Endpoint {
     case gitRevert
     case gitCommit
     case gitPush
-    case models
-    case modelsLive
-    case commands
-    case defaultModel
-    case reasoning(model: String? = nil, provider: String? = nil)
-    case personalities
-    case setPersonality
+    case modelOptions(profile: String?, refresh: Bool)
+    case modelSet
     case profiles
+    case activeProfile
     case switchProfile
     case createProfile
-    case providers
-    case settings
     case crons
     case cronCreate
     case cronUpdate(jobID: String)
@@ -116,30 +110,18 @@ enum Endpoint {
             return "/api/git/review/commit"
         case .gitPush:
             return "/api/git/review/push"
-        case .models:
-            return "/api/models"
-        case .modelsLive:
-            return "/api/models/live"
-        case .commands:
-            return "/api/commands"
-        case .defaultModel:
-            return "/api/default-model"
-        case .reasoning:
-            return "/api/reasoning"
-        case .personalities:
-            return "/api/personalities"
-        case .setPersonality:
-            return "/api/personality/set"
+        case .modelOptions:
+            return "/api/model/options"
+        case .modelSet:
+            return "/api/model/set"
         case .profiles:
             return "/api/profiles"
+        case .activeProfile:
+            return "/api/profiles/active"
         case .switchProfile:
-            return "/api/profile/switch"
+            return "/api/profiles/active"
         case .createProfile:
-            return "/api/profile/create"
-        case .providers:
-            return "/api/providers"
-        case .settings:
-            return "/api/settings"
+            return "/api/profiles"
         case .crons:
             return "/api/cron/jobs"
         case .cronCreate:
@@ -231,13 +213,13 @@ enum Endpoint {
                 items.append(URLQueryItem(name: "limit", value: "\(limit)"))
             }
             return items
-        case let .reasoning(model, provider):
+        case let .modelOptions(profile, refresh):
             var items: [URLQueryItem] = []
-            if let model, !model.isEmpty {
-                items.append(URLQueryItem(name: "model", value: model))
+            if refresh {
+                items.append(URLQueryItem(name: "refresh", value: "1"))
             }
-            if let provider, !provider.isEmpty {
-                items.append(URLQueryItem(name: "provider", value: provider))
+            if let profile, !profile.isEmpty, profile.lowercased() != "default" {
+                items.append(URLQueryItem(name: "profile", value: profile))
             }
             return items
         case let .skillContent(name, file):

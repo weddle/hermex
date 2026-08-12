@@ -48,7 +48,6 @@ enum ServerSideAction: String, Equatable {
     case workspace
     case reasoning
     case title
-    case personality
     case skills
     case compress
     case branch
@@ -61,7 +60,6 @@ enum ServerSideAction: String, Equatable {
 enum SlashCommandSubArgs: Equatable {
     case none
     case models
-    case personalities
     case reasoningLevels
     case workspaces
     case skills

@@ -19,16 +19,17 @@ struct SettingsView: View {
         self.authManager = authManager
         self.server = server
         self.initialScrollTarget = initialScrollTarget
-        // The CLI-sessions toggle is server-synced (#19): loads adopt the
-        // server's `show_cli_sessions`, toggles POST it back, failures revert.
-        // Stored per-server so one server's value never leaks into another.
-        _cliSessionsSync = State(initialValue: CliSessionsSyncModel(server: server) { value in
-            let client = APIClient(baseURL: server)
-            _ = try await client.updateSettings(showCliSessions: value)
-        } writeClaudeCodeToServer: { value in
-            let client = APIClient(baseURL: server)
-            _ = try await client.updateSettings(showClaudeCodeSessions: value)
-        })
+        // The CLI/Claude-Code session visibility toggles are local display
+        // filters, stored per-server (same keys as the session list) — the
+        // WebUI server-sync (`show_cli_sessions`) has no native equivalent.
+        _showsCliSessions = AppStorage(
+            wrappedValue: SessionRowDisplaySettings.showsCliSessions(for: server),
+            SessionRowDisplaySettings.showCliSessionsKey(for: server)
+        )
+        _showsClaudeCodeSessions = AppStorage(
+            wrappedValue: SessionRowDisplaySettings.showsClaudeCodeSessions(for: server),
+            SessionRowDisplaySettings.showClaudeCodeSessionsKey(for: server)
+        )
     }
 
     @ScaledMetric(relativeTo: .body) private var settingsCardSpacing: CGFloat = 18
@@ -39,7 +40,6 @@ struct SettingsView: View {
     @State private var isClearingCache = false
     @State private var cacheStatusMessage: String?
     @State private var isLoadingServerSettings = false
-    @State private var serverVersion: String?
     @State private var serverSettingsError: String?
     @State private var defaultModel: String?
     @State private var defaultProfileName: String?
@@ -60,7 +60,8 @@ struct SettingsView: View {
     @AppStorage(SessionRowDisplaySettings.showCronSessionsKey) private var showsCronSessions = true
     @AppStorage(SessionRowDisplaySettings.showSubagentSessionsKey)
     private var showsSubagentSessions = SessionRowDisplaySettings.defaultShowsSubagentSessions
-    @State private var cliSessionsSync: CliSessionsSyncModel
+    @AppStorage private var showsCliSessions: Bool
+    @AppStorage private var showsClaudeCodeSessions: Bool
     @AppStorage(StreamingSendBehavior.storageKey) private var streamingSendBehaviorRawValue = StreamingSendBehavior.steer.rawValue
     @AppStorage(ChatTranscriptDisplaySettings.showsThinkingAndToolCardsKey) private var showsThinkingAndToolCards = true
     @AppStorage(ChatTranscriptDisplaySettings.thinkingCardsStartExpandedKey) private var thinkingCardsStartExpanded = false
@@ -357,10 +358,7 @@ struct SettingsView: View {
                     SettingsToggleRow(
                         title: String(localized: "CLI Sessions"),
                         systemImage: "terminal",
-                        isOn: Binding(
-                            get: { cliSessionsSync.showsCliSessions },
-                            set: { cliSessionsSync.setShowsCliSessions($0) }
-                        )
+                        isOn: $showsCliSessions
                     )
 
                     SettingsDivider()
@@ -368,12 +366,9 @@ struct SettingsView: View {
                     SettingsToggleRow(
                         title: String(localized: "Claude Code Sessions"),
                         systemImage: "chevron.left.forwardslash.chevron.right",
-                        isOn: Binding(
-                            get: { cliSessionsSync.showsClaudeCodeSessions },
-                            set: { cliSessionsSync.setShowsClaudeCodeSessions($0) }
-                        )
+                        isOn: $showsClaudeCodeSessions
                     )
-                    .disabled(!cliSessionsSync.showsCliSessions)
+                    .disabled(!showsCliSessions)
 
                     SettingsDivider()
 
@@ -382,14 +377,6 @@ struct SettingsView: View {
                         systemImage: "arrow.triangle.branch",
                         isOn: $showsSubagentSessions
                     )
-
-                    if let syncError = cliSessionsSync.syncErrorMessage
-                        ?? cliSessionsSync.claudeCodeSyncErrorMessage {
-                        SettingsErrorFootnote(syncError)
-                    } else if cliSessionsSync.serverSyncsCliSessions
-                        || cliSessionsSync.serverSyncsClaudeCodeSessions {
-                        SettingsFootnote(String(localized: "Session visibility is synced with this server, so the WebUI follows it too."))
-                    }
                 }
 
                 SettingsCard(title: String(localized: "Siri & Shortcuts")) {
@@ -440,25 +427,6 @@ struct SettingsView: View {
 
                     SettingsDivider()
 
-                    SettingsValueRow(title: String(localized: "Status")) {
-                        serverStatusPill
-                    }
-
-                    SettingsDivider()
-
-                    NavigationLink {
-                        ProvidersView(server: server)
-                    } label: {
-                        SettingsAccessoryRow(
-                            title: String(localized: "Providers"),
-                            systemImage: "key.horizontal"
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityHint("Opens the provider status screen.")
-
-                    SettingsDivider()
-
                     NavigationLink {
                         CustomHeadersSettingsView(authManager: authManager)
                     } label: {
@@ -469,10 +437,6 @@ struct SettingsView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityHint("Opens the custom request headers editor.")
-
-                    SettingsValueRow(title: String(localized: "Version")) {
-                        serverVersionContent
-                    }
                 }
 
                 SettingsCard(title: String(localized: "App")) {
@@ -679,20 +643,6 @@ struct SettingsView: View {
             : String(localized: "You'll return to onboarding and need the server URL and password to sign back in.")
     }
 
-    @ViewBuilder
-    private var serverVersionContent: some View {
-        if isLoadingServerSettings {
-            ProgressView()
-        } else if let serverVersion {
-            Text(serverVersion)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-        } else {
-            Text(serverSettingsError ?? String(localized: "Unknown"))
-                .foregroundStyle(.secondary)
-        }
-    }
-
     private var defaultModelLabel: String {
         if isLoadingDefaultModel {
             return String(localized: "Loading")
@@ -719,20 +669,6 @@ struct SettingsView: View {
         }
 
         return defaultProfileName == "default" ? String(localized: "Default") : defaultProfileName
-    }
-
-    @ViewBuilder
-    private var serverStatusPill: some View {
-        if isLoadingServerSettings {
-            SettingsStatusPill(label: String(localized: "Loading"))
-        } else if serverSettingsError == nil, serverVersion != nil {
-            // Only "Connected" when the latest load actually succeeded — a stale
-            // `serverVersion` from an earlier success must not mask a now-failed
-            // load (e.g. a restart that never came back).
-            SettingsStatusPill(label: String(localized: "Connected"))
-        } else {
-            SettingsStatusPill(label: serverSettingsError ?? String(localized: "Unknown"), tint: .orange)
-        }
     }
 
     private var appVersion: String {
@@ -802,21 +738,6 @@ struct SettingsView: View {
         serverSettingsError = nil
         let client = APIClient(baseURL: server)
 
-        do {
-            let settings = try await client.settings()
-            serverVersion = settings.webuiVersion
-            // Server wins on conflict: `show_cli_sessions` is the cross-device
-            // truth, the local value is just its offline cache (#19).
-            cliSessionsSync.adopt(serverValue: settings.showCliSessions)
-            cliSessionsSync.adoptClaudeCode(serverValue: settings.showClaudeCodeSessions)
-            if serverVersion == nil {
-                serverSettingsError = String(localized: "Unknown")
-            }
-        } catch {
-            authManager.handleAPIError(error)
-            serverSettingsError = String(localized: "Unavailable")
-        }
-
         isLoadingServerSettings = false
 
         do {
@@ -824,6 +745,7 @@ struct SettingsView: View {
             defaultModel = catalog.defaultModel
         } catch {
             // Non-fatal: default model is optional info
+            serverSettingsError = String(localized: "Unavailable")
             defaultModel = nil
         }
 

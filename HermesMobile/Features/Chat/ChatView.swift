@@ -246,9 +246,7 @@ struct ChatView: View {
             workspaceRoots: viewModel.workspaceRoots,
             selectedWorkspacePath: viewModel.selectedWorkspacePath,
             workspaceSuggestions: viewModel.workspaceSuggestions,
-            personalitySuggestions: viewModel.personalitySuggestions,
             skillSuggestions: viewModel.skillSlashSuggestions,
-            agentCommands: viewModel.agentCommands,
             profileOptions: viewModel.profileOptions,
             isSingleProfileMode: viewModel.isSingleProfileMode,
             selectedProfileName: viewModel.selectedProfileName,
@@ -288,9 +286,6 @@ struct ChatView: View {
             },
             onLoadWorkspaceSuggestions: { prefix in
                 await viewModel.loadWorkspaceSuggestions(prefix: prefix)
-            },
-            onLoadPersonalitySuggestions: {
-                await viewModel.loadPersonalitySuggestions()
             },
             onLoadSkillSuggestions: {
                 await viewModel.loadSkillSlashSuggestions()

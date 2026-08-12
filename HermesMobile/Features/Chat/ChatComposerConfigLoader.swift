@@ -14,7 +14,6 @@ struct ChatComposerConfigState: Equatable, Sendable {
     /// (older servers) keeps it visible.
     var supportsReasoningEffort: Bool?
     var modelCatalogGroups: [ModelCatalogGroup]
-    var agentCommands: [AgentCommand]
     var workspaceRoots: [WorkspaceRoot]
     var workspaceSuggestions: [String]
     var profileOptions: [ProfileSummary]
@@ -30,7 +29,6 @@ struct ChatComposerConfigState: Equatable, Sendable {
         supportedReasoningEfforts: [String]? = nil,
         supportsReasoningEffort: Bool? = nil,
         modelCatalogGroups: [ModelCatalogGroup] = [],
-        agentCommands: [AgentCommand] = [],
         workspaceRoots: [WorkspaceRoot] = [],
         workspaceSuggestions: [String] = [],
         profileOptions: [ProfileSummary] = [],
@@ -45,7 +43,6 @@ struct ChatComposerConfigState: Equatable, Sendable {
         self.supportedReasoningEfforts = supportedReasoningEfforts
         self.supportsReasoningEffort = supportsReasoningEffort
         self.modelCatalogGroups = modelCatalogGroups
-        self.agentCommands = agentCommands
         self.workspaceRoots = workspaceRoots
         self.workspaceSuggestions = workspaceSuggestions
         self.profileOptions = profileOptions
@@ -101,7 +98,7 @@ struct ChatComposerConfigLoader {
                 state.currentModel = Self.nonEmpty(selectedProfile?.model)
             }
 
-            let modelsResponse = try await client.models()
+            let modelsResponse = try await client.models(profile: state.selectedProfileName)
             state.modelCatalogGroups = modelsResponse.catalogGroups
             if state.currentModel == nil {
                 state.currentModel = modelsResponse.defaultModel
@@ -111,16 +108,17 @@ struct ChatComposerConfigLoader {
                     ?? Self.uniqueProvider(for: state.currentModel, in: state.modelCatalogGroups)
             }
 
-            // Scope the query to the session's resolved model/provider so the
-            // gating fields are model-accurate (issue #18); the seeded effort is
-            // the server's already-coerced value for that model.
-            let reasoningResponse = try await client.reasoning(
-                model: Self.nonEmpty(state.currentModel),
-                provider: Self.nonEmpty(state.currentModelProvider)
-            )
+            // The native dashboard has no model-scoped `/api/reasoning`; the
+            // reasoning gating comes from the profile's resolved model + its
+            // capabilities in `/api/model/options`. The seeded effort stays the
+            // locally-selected value (the composer's effort menu).
+            let reasoningResponse = try await client.reasoning(profile: state.selectedProfileName)
             state.selectedReasoningEffort = reasoningResponse.effectiveEffort
+                ?? state.selectedReasoningEffort
             state.supportedReasoningEfforts = reasoningResponse.normalizedSupportedEfforts
+                ?? state.supportedReasoningEfforts
             state.supportsReasoningEffort = reasoningResponse.supportsReasoningEffort
+                ?? state.supportsReasoningEffort
 
             let workspaceResponse = try await client.workspaces()
             state.workspaceRoots = workspaceResponse.workspaces ?? []
@@ -130,12 +128,6 @@ struct ChatComposerConfigLoader {
             state.workspaceSuggestions = state.workspaceRoots.compactMap(\.path)
         } catch {
             configurationError = error
-        }
-
-        do {
-            state.agentCommands = (try await client.commands()).commands ?? []
-        } catch {
-            state.agentCommands = []
         }
 
         return ChatComposerConfigLoadResult(
