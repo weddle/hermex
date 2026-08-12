@@ -9,22 +9,52 @@ struct SessionsResponse: Decodable {
     let archivedCount: Int?
     let serverTime: Double?
     let serverTz: String?
+
+    init(
+        sessions: [SessionSummary]? = nil,
+        cliCount: Int? = nil,
+        archivedCount: Int? = nil,
+        serverTime: Double? = nil,
+        serverTz: String? = nil
+    ) {
+        self.sessions = sessions
+        self.cliCount = cliCount
+        self.archivedCount = archivedCount
+        self.serverTime = serverTime
+        self.serverTz = serverTz
+    }
 }
 
 struct SessionSearchResponse: Decodable, Equatable {
     let sessions: [SessionSummary]?
     let query: String?
     let count: Int?
+
+    init(sessions: [SessionSummary]? = nil, query: String? = nil, count: Int? = nil) {
+        self.sessions = sessions
+        self.query = query
+        self.count = count
+    }
 }
 
 struct SessionResponse: Decodable {
     let session: SessionDetail?
+
+    init(session: SessionDetail? = nil) {
+        self.session = session
+    }
 }
 
 struct SessionMutationResponse: Decodable {
     let ok: Bool?
     let session: SessionSummary?
     let error: String?
+
+    init(ok: Bool? = nil, session: SessionSummary? = nil, error: String? = nil) {
+        self.ok = ok
+        self.session = session
+        self.error = error
+    }
 }
 
 struct ProjectsResponse: Decodable, Equatable {
@@ -110,6 +140,13 @@ struct SessionBranchResponse: Decodable, Equatable {
     let title: String?
     let parentSessionId: String?
     let error: String?
+
+    init(sessionId: String? = nil, title: String? = nil, parentSessionId: String? = nil, error: String? = nil) {
+        self.sessionId = sessionId
+        self.title = title
+        self.parentSessionId = parentSessionId
+        self.error = error
+    }
 }
 
 struct SessionCompressResponse: Decodable, Equatable {
@@ -118,6 +155,14 @@ struct SessionCompressResponse: Decodable, Equatable {
     let summary: SessionCompressionSummary?
     let focusTopic: String?
     let error: String?
+
+    init(ok: Bool? = nil, session: SessionDetail? = nil, summary: SessionCompressionSummary? = nil, focusTopic: String? = nil, error: String? = nil) {
+        self.ok = ok
+        self.session = session
+        self.summary = summary
+        self.focusTopic = focusTopic
+        self.error = error
+    }
 }
 
 struct SessionCompressionSummary: Decodable, Equatable {
@@ -125,6 +170,13 @@ struct SessionCompressionSummary: Decodable, Equatable {
     let tokenLine: String?
     let note: String?
     let referenceMessage: String?
+
+    init(headline: String? = nil, tokenLine: String? = nil, note: String? = nil, referenceMessage: String? = nil) {
+        self.headline = headline
+        self.tokenLine = tokenLine
+        self.note = note
+        self.referenceMessage = referenceMessage
+    }
 
     var compressedTokenEstimate: Int? {
         guard let tokenLine, !tokenLine.isEmpty else { return nil }
@@ -647,6 +699,96 @@ struct SessionDetail: Decodable, Equatable, Identifiable {
             )) ?? nil)
         compressionAnchorSummary = container.decodeLossyStringIfPresent(forKey: .compressionAnchorSummary)
             ?? container.decodeLossyStringIfPresent(forKey: .snakeCasedCompressionAnchorSummary)
+    }
+
+    // MARK: - Programmatic construction
+
+    /// Full memberwise initializer used by the native-dashboard mapping layer
+    /// (APIClient+Sessions.swift) to build a detail from a `NativeSessionRow`
+    /// plus an optional transcript page. All fields optional; the app renders
+    /// nil/absent metadata tolerantly.
+    init(
+        sessionId: String? = nil,
+        title: String? = nil,
+        workspace: String? = nil,
+        model: String? = nil,
+        modelProvider: String? = nil,
+        messageCount: Int? = nil,
+        createdAt: Double? = nil,
+        updatedAt: Double? = nil,
+        lastMessageAt: Double? = nil,
+        pinned: Bool? = nil,
+        archived: Bool? = nil,
+        projectId: String? = nil,
+        profile: String? = nil,
+        inputTokens: Int? = nil,
+        outputTokens: Int? = nil,
+        estimatedCost: Double? = nil,
+        activeStreamId: String? = nil,
+        pendingUserMessage: String? = nil,
+        pendingAttachments: [JSONValue]? = nil,
+        pendingStartedAt: Double? = nil,
+        worktreePath: String? = nil,
+        contextLength: Int? = nil,
+        thresholdTokens: Int? = nil,
+        lastPromptTokens: Int? = nil,
+        isCliSession: Bool? = nil,
+        sourceTag: String? = nil,
+        rawSource: String? = nil,
+        sessionSource: String? = nil,
+        sourceLabel: String? = nil,
+        parentSessionId: String? = nil,
+        relationshipType: String? = nil,
+        readOnly: Bool? = nil,
+        isReadOnly: Bool? = nil,
+        messages: [ChatMessage]? = nil,
+        toolCalls: [PersistedToolCall]? = nil,
+        messagesTruncated: Bool? = nil,
+        messagesOffset: Int? = nil,
+        compressionAnchorVisibleIdx: Int? = nil,
+        compressionAnchorMessageKey: CompressionAnchorMessageKey? = nil,
+        compressionAnchorSummary: String? = nil
+    ) {
+        self.sessionId = sessionId
+        self.title = title
+        self.workspace = workspace
+        self.model = model
+        self.modelProvider = modelProvider
+        self.messageCount = messageCount
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.lastMessageAt = lastMessageAt
+        self.pinned = pinned
+        self.archived = archived
+        self.projectId = projectId
+        self.profile = profile
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.estimatedCost = estimatedCost
+        self.activeStreamId = activeStreamId
+        self.pendingUserMessage = pendingUserMessage
+        self.pendingAttachments = pendingAttachments
+        self.pendingStartedAt = pendingStartedAt
+        self.worktreePath = worktreePath
+        self.contextLength = contextLength
+        self.thresholdTokens = thresholdTokens
+        self.lastPromptTokens = lastPromptTokens
+        self.isCliSession = isCliSession
+        self.sourceTag = sourceTag
+        self.rawSource = rawSource
+        self.sessionSource = sessionSource
+        self.sourceLabel = sourceLabel
+        self.parentSessionId = parentSessionId
+        self.relationshipType = relationshipType
+        self.readOnly = readOnly
+        self.isReadOnly = isReadOnly
+        self.messages = messages
+        self.toolCalls = toolCalls
+        self.messagesTruncated = messagesTruncated
+        self.messagesOffset = messagesOffset
+        self.compressionAnchorVisibleIdx = compressionAnchorVisibleIdx
+        self.compressionAnchorMessageKey = compressionAnchorMessageKey
+        self.compressionAnchorSummary = compressionAnchorSummary
     }
 
     private static func decodeMessagesTolerantly(

@@ -6,23 +6,12 @@ enum Endpoint {
     case login
     case logout
     case wsTicket
-    case sessions(includeArchived: Bool = false, archivedLimit: Int? = nil)
-    case sessionsSearch(query: String, content: Bool, depth: Int)
-    case session(id: String, includeMessages: Bool, messageLimit: Int?, messageBefore: Int?, expandRenderable: Bool = false)
-    case sessionStatus(id: String)
-    case newSession
-    case renameSession
-    case deleteSession
-    case pinSession
-    case archiveSession
-    case branchSession
-    case compressSession
-    case undoSession
-    case retrySession
-    case truncateSession
-    case updateSession
-    case moveSession
-    case sessionYolo(sessionID: String?)
+    case sessions(includeArchived: Bool = false, limit: Int? = 100)
+    case sessionsSearch(query: String, limit: Int? = 20)
+    case session(id: String)
+    case sessionMessages(id: String, limit: Int?, offset: Int?, order: String?)
+    case sessionPatch(id: String)
+    case deleteSession(id: String)
     case exportSession(sessionID: String, format: SessionExportFormat)
     case chatStreamStatus(streamID: String)
     case chatSteer
@@ -85,36 +74,14 @@ enum Endpoint {
             return "/api/sessions"
         case .sessionsSearch:
             return "/api/sessions/search"
-        case .session:
-            return "/api/session"
-        case .sessionStatus:
-            return "/api/session/status"
-        case .newSession:
-            return "/api/session/new"
-        case .renameSession:
-            return "/api/session/rename"
-        case .deleteSession:
-            return "/api/session/delete"
-        case .pinSession:
-            return "/api/session/pin"
-        case .archiveSession:
-            return "/api/session/archive"
-        case .branchSession:
-            return "/api/session/branch"
-        case .compressSession:
-            return "/api/session/compress"
-        case .undoSession:
-            return "/api/session/undo"
-        case .retrySession:
-            return "/api/session/retry"
-        case .truncateSession:
-            return "/api/session/truncate"
-        case .updateSession:
-            return "/api/session/update"
-        case .moveSession:
-            return "/api/session/move"
-        case .sessionYolo:
-            return "/api/session/yolo"
+        case let .session(id):
+            return "/api/sessions/\(id)"
+        case let .sessionMessages(id, _, _, _):
+            return "/api/sessions/\(id)/messages"
+        case let .sessionPatch(id):
+            return "/api/sessions/\(id)"
+        case let .deleteSession(id):
+            return "/api/sessions/\(id)"
         case .exportSession:
             return "/api/session/export"
         case .chatStreamStatus:
@@ -208,53 +175,32 @@ enum Endpoint {
 
     var queryItems: [URLQueryItem] {
         switch self {
-        case let .sessions(includeArchived, archivedLimit):
-            // Opt-in (issue #17): the server's default response excludes archived
-            // rows, so the main list request stays byte-identical when off.
-            // `archived_limit` only means something alongside `include_archived=1`
-            // (`_query_positive_int` in upstream routes.py), so it is only sent then.
-            guard includeArchived else { return [] }
-
-            var items = [URLQueryItem(name: "include_archived", value: "1")]
-            if let archivedLimit {
-                items.append(URLQueryItem(name: "archived_limit", value: "\(archivedLimit)"))
+        case let .sessions(includeArchived, limit):
+            var items = [URLQueryItem(name: "archived", value: includeArchived ? "include" : "exclude")]
+            if let limit {
+                items.append(URLQueryItem(name: "limit", value: "\(limit)"))
             }
             return items
-        case let .sessionsSearch(query, content, depth):
-            return [
-                URLQueryItem(name: "q", value: query),
-                URLQueryItem(name: "content", value: content ? "1" : "0"),
-                URLQueryItem(name: "depth", value: "\(depth)")
-            ]
-        case let .session(id, includeMessages, messageLimit, messageBefore, expandRenderable):
-            var items = [
-                URLQueryItem(name: "session_id", value: id),
-                URLQueryItem(name: "messages", value: includeMessages ? "1" : "0")
-            ]
-
-            if let messageLimit {
-                items.append(URLQueryItem(name: "msg_limit", value: "\(messageLimit)"))
+        case let .sessionsSearch(query, limit):
+            var items = [URLQueryItem(name: "q", value: query)]
+            if let limit {
+                items.append(URLQueryItem(name: "limit", value: "\(limit)"))
             }
-
-            if let messageBefore {
-                items.append(URLQueryItem(name: "msg_before", value: "\(messageBefore)"))
-            }
-
-            // Opt-in (upstream #3790): on cold load only, ask the server to widen the
-            // window until it holds ~msg_limit *renderable* rows so tool-heavy sessions
-            // don't open showing 1–2 bubbles. Omitted when false; older servers ignore it.
-            if expandRenderable {
-                items.append(URLQueryItem(name: "expand_renderable", value: "1"))
-            }
-
             return items
-        case let .sessionStatus(id):
-            return [URLQueryItem(name: "session_id", value: id)]
+        case let .sessionMessages(_, limit, offset, order):
+            var items: [URLQueryItem] = []
+            if let limit {
+                items.append(URLQueryItem(name: "limit", value: "\(limit)"))
+            }
+            if let offset {
+                items.append(URLQueryItem(name: "offset", value: "\(offset)"))
+            }
+            if let order {
+                items.append(URLQueryItem(name: "order", value: order))
+            }
+            return items
         case let .chatStreamStatus(streamID):
             return [URLQueryItem(name: "stream_id", value: streamID)]
-        case let .sessionYolo(sessionID):
-            guard let sessionID else { return [] }
-            return [URLQueryItem(name: "session_id", value: sessionID)]
         case let .exportSession(sessionID, format):
             return [
                 URLQueryItem(name: "session_id", value: sessionID),

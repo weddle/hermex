@@ -468,8 +468,43 @@ final class HermesGatewayClient {
         return sessionID
     }
 
+    /// Branches a live session via the native `session.branch` RPC. `count`
+    /// limits the copied history; `name` becomes the branch title.
+    func branch(sessionID: String, count: Int? = nil, name: String? = nil) async throws -> GatewayValue {
+        var params: [String: Any] = ["session_id": sessionID]
+        if let count { params["count"] = count }
+        if let name, !name.isEmpty { params["name"] = name }
+        return try await rpc("session.branch", params: params)
+    }
+
     func compressSession(_ sessionID: String) async throws {
         _ = try await rpc("session.compress", params: ["session_id": sessionID])
+    }
+
+    /// Compresses a session via `session.compress`, returning the full result
+    /// (status, summary, transcript) so the client can render it.
+    @discardableResult
+    func compress(sessionID: String, focusTopic: String? = nil) async throws -> GatewayValue {
+        var params: [String: Any] = ["session_id": sessionID]
+        if let focusTopic, !focusTopic.isEmpty { params["focus_topic"] = focusTopic }
+        return try await rpc("session.compress", params: params, timeout: 120)
+    }
+
+    /// Sets the session's working directory via `session.cwd.set`.
+    func setSessionCwd(sessionID: String, cwd: String) async throws {
+        _ = try await rpc("session.cwd.set", params: [
+            "session_id": sessionID,
+            "cwd": cwd
+        ])
+    }
+
+    /// Reads the session's approval-bypass (YOLO) flag via `config.set` with the
+    /// `"status"` sentinel value (the native read contract for a key).
+    func yoloStatus(sessionID: String) async throws -> GatewayValue {
+        try await rpc("config.get", params: [
+            "key": "yolo",
+            "session_id": sessionID
+        ])
     }
 
     func setSessionTitle(_ sessionID: String, title: String) async throws {

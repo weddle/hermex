@@ -189,6 +189,11 @@ struct SessionYoloResponse: Decodable, Equatable {
     let ok: Bool?
     let yoloEnabled: Bool?
 
+    init(ok: Bool? = nil, yoloEnabled: Bool? = nil) {
+        self.ok = ok
+        self.yoloEnabled = yoloEnabled
+    }
+
     enum CodingKeys: String, CodingKey {
         case ok
         case yoloEnabled
