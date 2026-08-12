@@ -168,20 +168,14 @@ private struct GitBranchPickerSheet: View {
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(name).foregroundStyle(.primary)
-                    if let subject = branch.subject, !subject.isEmpty {
-                        Text(subject).font(AppFont.caption()).foregroundStyle(.secondary).lineLimit(1)
+                    if let worktree = branch.worktreePath, !worktree.isEmpty {
+                        Text(worktree).font(AppFont.caption()).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
 
                 Spacer(minLength: 8)
 
                 if isCurrent { badge("Current") }
-
-                if (branch.ahead ?? 0) > 0 || (branch.behind ?? 0) > 0 {
-                    Text("↑\(branch.ahead ?? 0) ↓\(branch.behind ?? 0)")
-                        .font(AppFont.mono(style: .caption2))
-                        .foregroundStyle(.secondary)
-                }
             }
         }
         .disabled(isCurrent || name.isEmpty || isSwitching)

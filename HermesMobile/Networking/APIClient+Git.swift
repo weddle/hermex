@@ -1,156 +1,90 @@
 import Foundation
 
-// Workspace Git calls. Every call is scoped to a chat session via `session_id`; the
-// server resolves the workspace path itself, mirroring `APIClient+Workspace.swift`.
+// Workspace Git calls, retargeted to the native Hermes Agent dashboard git
+// router (`web_routers/git.py`). The native surface is PATH-based — every
+// request carries the working-directory path (`path`) the server git runs in —
+// scoped per chat session via the session's resolved workspace path.
 extension APIClient {
-    func gitInfo(sessionID: String) async throws -> GitInfoResponse {
-        try await send(endpoint: .gitInfo(sessionID: sessionID), method: "GET")
+    func gitStatus(path: String) async throws -> GitStatusResponse {
+        try await send(endpoint: .gitStatus(path: path), method: "GET")
     }
 
-    func gitStatus(sessionID: String) async throws -> GitStatusResponse {
-        try await send(endpoint: .gitStatus(sessionID: sessionID), method: "GET")
+    func gitBranches(path: String) async throws -> GitBranchesResponse {
+        try await send(endpoint: .gitBranches(path: path), method: "GET")
     }
 
-    func gitBranches(sessionID: String) async throws -> GitBranchesResponse {
-        try await send(endpoint: .gitBranches(sessionID: sessionID), method: "GET")
-    }
-
-    func gitDiff(sessionID: String, path: String, kind: String = "unstaged") async throws -> GitDiffResponse {
+    func gitDiff(path: String, file: String, kind: String = "unstaged") async throws -> GitDiffResponse {
         try await send(
-            endpoint: .gitDiff(sessionID: sessionID, path: path, kind: kind),
+            endpoint: .gitDiff(path: path, file: file, kind: kind),
             method: "GET"
         )
     }
 
-    func gitFetch(sessionID: String) async throws -> GitRemoteActionResponse {
-        try await send(endpoint: .gitFetch, method: "POST", body: GitSessionRequest(sessionID: sessionID))
-    }
-
-    func gitPull(sessionID: String) async throws -> GitRemoteActionResponse {
-        try await send(endpoint: .gitPull, method: "POST", body: GitSessionRequest(sessionID: sessionID))
-    }
-
-    func gitPush(sessionID: String) async throws -> GitRemoteActionResponse {
-        try await send(endpoint: .gitPush, method: "POST", body: GitSessionRequest(sessionID: sessionID))
-    }
-
-    func gitCheckout(sessionID: String, target: GitCheckoutTarget) async throws -> GitCheckoutResponse {
+    func gitBranchSwitch(path: String, branch: String) async throws -> GitBranchSwitchResponse {
         try await send(
-            endpoint: .gitCheckout,
+            endpoint: .gitBranchSwitch,
             method: "POST",
-            body: GitCheckoutRequest(sessionID: sessionID, target: target, includesDirtyMode: true)
+            body: GitBranchSwitchRequest(path: path, branch: branch)
         )
     }
 
-    func gitStashCheckout(sessionID: String, target: GitCheckoutTarget) async throws -> GitCheckoutResponse {
+    func gitStage(path: String, file: String?) async throws -> GitMutationResponse {
         try await send(
-            endpoint: .gitStashCheckout,
+            endpoint: .gitStage,
             method: "POST",
-            body: GitCheckoutRequest(sessionID: sessionID, target: target, includesDirtyMode: false)
+            body: GitFileRequest(path: path, file: file)
         )
     }
 
-    // MARK: - Commit flow (issue #315, Slice C)
-
-    func gitStage(sessionID: String, paths: [String]) async throws -> GitMutationResponse {
-        try await send(endpoint: .gitStage, method: "POST", body: GitPathsRequest(sessionID: sessionID, paths: paths))
-    }
-
-    func gitUnstage(sessionID: String, paths: [String]) async throws -> GitMutationResponse {
-        try await send(endpoint: .gitUnstage, method: "POST", body: GitPathsRequest(sessionID: sessionID, paths: paths))
-    }
-
-    func gitDiscard(sessionID: String, paths: [String], deleteUntracked: Bool = false) async throws -> GitMutationResponse {
+    func gitUnstage(path: String, file: String?) async throws -> GitMutationResponse {
         try await send(
-            endpoint: .gitDiscard,
+            endpoint: .gitUnstage,
             method: "POST",
-            body: GitDiscardRequest(sessionID: sessionID, paths: paths, deleteUntracked: deleteUntracked)
+            body: GitFileRequest(path: path, file: file)
         )
     }
 
-    func gitCommit(sessionID: String, message: String) async throws -> GitCommitResponse {
-        try await send(endpoint: .gitCommit, method: "POST", body: GitCommitRequest(sessionID: sessionID, message: message))
-    }
-
-    func gitCommitSelected(sessionID: String, message: String, paths: [String]) async throws -> GitCommitResponse {
+    func gitRevert(path: String, file: String?) async throws -> GitMutationResponse {
         try await send(
-            endpoint: .gitCommitSelected,
+            endpoint: .gitRevert,
             method: "POST",
-            body: GitCommitSelectedRequest(sessionID: sessionID, message: message, paths: paths)
+            body: GitFileRequest(path: path, file: file)
         )
     }
 
-    /// Generate a commit message from the staged diff. Not gated by the destructive flag.
-    /// Generation runs an LLM server-side, so it gets a wider timeout than other calls.
-    func gitCommitMessage(sessionID: String) async throws -> GitCommitMessageResponse {
+    func gitCommit(path: String, message: String, push: Bool = false) async throws -> GitMutationResponse {
         try await send(
-            endpoint: .gitCommitMessage,
+            endpoint: .gitCommit,
             method: "POST",
-            body: GitSessionRequest(sessionID: sessionID),
-            timeout: Self.commitMessageTimeout
+            body: GitCommitBody(path: path, message: message, push: push)
         )
     }
 
-    /// Generate a commit message from the selected paths' diff. Not gated by the destructive flag.
-    func gitCommitMessageSelected(sessionID: String, paths: [String]) async throws -> GitCommitMessageResponse {
+    func gitPush(path: String) async throws -> GitMutationResponse {
         try await send(
-            endpoint: .gitCommitMessageSelected,
+            endpoint: .gitPush,
             method: "POST",
-            body: GitPathsRequest(sessionID: sessionID, paths: paths),
-            timeout: Self.commitMessageTimeout
+            body: GitPathRequest(path: path)
         )
     }
-
-    /// LLM commit-message generation can take far longer than the 60s session default,
-    /// especially over a cold tunnel; allow up to two minutes before timing out.
-    private static let commitMessageTimeout: TimeInterval = 120
 }
 
-private struct GitSessionRequest: Encodable {
-    let sessionID: String
+private struct GitPathRequest: Encodable {
+    let path: String
 }
 
-private struct GitPathsRequest: Encodable {
-    let sessionID: String
-    let paths: [String]
+private struct GitFileRequest: Encodable {
+    let path: String
+    let file: String?
 }
 
-private struct GitDiscardRequest: Encodable {
-    let sessionID: String
-    let paths: [String]
-    let deleteUntracked: Bool
-}
-
-private struct GitCommitRequest: Encodable {
-    let sessionID: String
+private struct GitCommitBody: Encodable {
+    let path: String
     let message: String
+    let push: Bool
 }
 
-private struct GitCommitSelectedRequest: Encodable {
-    let sessionID: String
-    let message: String
-    let paths: [String]
-}
-
-private struct GitCheckoutRequest: Encodable {
-    let sessionID: String
-    let ref: String
-    let mode: String
-    let newBranch: String?
-    let track: Bool?
-    let dirtyMode: String?
-
-    init(sessionID: String, target: GitCheckoutTarget, includesDirtyMode: Bool) {
-        self.sessionID = sessionID
-        ref = target.ref
-        // Creating a brand-new local branch must use the server's "new" mode. The
-        // "local" mode only switches to an existing branch and ignores `new_branch`
-        // entirely, so sending it for a create silently switches to `ref` instead
-        // (a no-op when already on it). Remote checkouts keep "remote" — that mode
-        // creates a tracking branch itself.
-        mode = (target.mode == .local && target.newBranch != nil) ? "new" : target.mode.rawValue
-        newBranch = target.newBranch
-        track = target.track ? true : nil
-        dirtyMode = includesDirtyMode ? "block" : nil
-    }
+private struct GitBranchSwitchRequest: Encodable {
+    let path: String
+    let branch: String
 }

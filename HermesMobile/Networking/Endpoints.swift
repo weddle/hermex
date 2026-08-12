@@ -32,22 +32,15 @@ enum Endpoint {
     case file(path: String)
     case rawFile(path: String)
     case media(path: String)
-    case gitInfo(sessionID: String)
-    case gitStatus(sessionID: String)
-    case gitBranches(sessionID: String)
-    case gitDiff(sessionID: String, path: String, kind: String)
-    case gitFetch
-    case gitPull
-    case gitPush
-    case gitCheckout
-    case gitStashCheckout
+    case gitStatus(path: String)
+    case gitBranches(path: String)
+    case gitDiff(path: String, file: String, kind: String)
+    case gitBranchSwitch
     case gitStage
     case gitUnstage
-    case gitDiscard
+    case gitRevert
     case gitCommit
-    case gitCommitSelected
-    case gitCommitMessage
-    case gitCommitMessageSelected
+    case gitPush
     case models
     case modelsLive
     case commands
@@ -139,38 +132,24 @@ enum Endpoint {
             return "/api/fs/read-text"
         case .rawFile, .media:
             return "/api/files/download"
-        case .gitInfo:
-            return "/api/git-info"
         case .gitStatus:
             return "/api/git/status"
         case .gitBranches:
             return "/api/git/branches"
         case .gitDiff:
-            return "/api/git/diff"
-        case .gitFetch:
-            return "/api/git/fetch"
-        case .gitPull:
-            return "/api/git/pull"
-        case .gitPush:
-            return "/api/git/push"
-        case .gitCheckout:
-            return "/api/git/checkout"
-        case .gitStashCheckout:
-            return "/api/git/stash-checkout"
+            return "/api/git/review/diff"
+        case .gitBranchSwitch:
+            return "/api/git/branch/switch"
         case .gitStage:
-            return "/api/git/stage"
+            return "/api/git/review/stage"
         case .gitUnstage:
-            return "/api/git/unstage"
-        case .gitDiscard:
-            return "/api/git/discard"
+            return "/api/git/review/unstage"
+        case .gitRevert:
+            return "/api/git/review/revert"
         case .gitCommit:
-            return "/api/git/commit"
-        case .gitCommitSelected:
-            return "/api/git/commit-selected"
-        case .gitCommitMessage:
-            return "/api/git/commit-message"
-        case .gitCommitMessageSelected:
-            return "/api/git/commit-message-selected"
+            return "/api/git/review/commit"
+        case .gitPush:
+            return "/api/git/review/push"
         case .models:
             return "/api/models"
         case .modelsLive:
@@ -293,15 +272,15 @@ enum Endpoint {
             return [URLQueryItem(name: "path", value: path)]
         case let .media(path):
             return [URLQueryItem(name: "path", value: path)]
-        case let .gitInfo(sessionID),
-            let .gitStatus(sessionID),
-            let .gitBranches(sessionID):
-            return [URLQueryItem(name: "session_id", value: sessionID)]
-        case let .gitDiff(sessionID, path, kind):
+        case let .gitStatus(path),
+            let .gitBranches(path):
+            return [URLQueryItem(name: "path", value: path)]
+        case let .gitDiff(path, file, kind):
             return [
-                URLQueryItem(name: "session_id", value: sessionID),
                 URLQueryItem(name: "path", value: path),
-                URLQueryItem(name: "kind", value: kind)
+                URLQueryItem(name: "file", value: file),
+                URLQueryItem(name: "scope", value: "uncommitted"),
+                URLQueryItem(name: "staged", value: kind == "staged" ? "true" : "false")
             ]
         case let .cronStatus(jobID):
             guard let jobID else { return [] }

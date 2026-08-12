@@ -3,17 +3,17 @@ import SwiftUI
 struct GitWorkspaceView: View {
     let onAPIError: (Error) -> Void
 
-    private let session: SessionSummary
+    private let path: String
     private let server: URL
     @State private var viewModel: GitWorkspaceViewModel
     @State private var selectedFile: GitFile?
     @Environment(\.dismiss) private var dismiss
 
-    init(session: SessionSummary, server: URL, onAPIError: @escaping (Error) -> Void) {
-        self.session = session
+    init(path: String, server: URL, onAPIError: @escaping (Error) -> Void) {
+        self.path = path
         self.server = server
         self.onAPIError = onAPIError
-        _viewModel = State(initialValue: GitWorkspaceViewModel(session: session, server: server))
+        _viewModel = State(initialValue: GitWorkspaceViewModel(path: path, server: server))
     }
 
     var body: some View {
@@ -35,7 +35,7 @@ struct GitWorkspaceView: View {
         .presentationDetents([.medium, .large])
         .adaptivePagePresentation()
         .sheet(item: $selectedFile) { file in
-            GitDiffView(session: session, server: server, file: file, onAPIError: onAPIError)
+            GitDiffView(path: path, server: server, file: file, onAPIError: onAPIError)
         }
     }
 
@@ -84,14 +84,6 @@ struct GitWorkspaceView: View {
                         }
                         .buttonStyle(.plain)
                     }
-                }
-
-                if status.truncated == true {
-                    Text("Showing first 500 changed files.")
-                        .font(AppFont.footnote())
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.vertical, 6)
                 }
             }
             .padding(16)

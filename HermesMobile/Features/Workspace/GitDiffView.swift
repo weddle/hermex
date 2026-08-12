@@ -3,7 +3,7 @@ import SwiftUI
 struct GitDiffView: View {
     let onAPIError: (Error) -> Void
 
-    private let session: SessionSummary
+    private let path: String
     private let file: GitFile
     private let apiClient: APIClient
     @State private var diff: GitDiff?
@@ -13,8 +13,8 @@ struct GitDiffView: View {
     @State private var collapsedHunks: Set<Int> = []
     @Environment(\.dismiss) private var dismiss
 
-    init(session: SessionSummary, server: URL, file: GitFile, onAPIError: @escaping (Error) -> Void) {
-        self.session = session
+    init(path: String, server: URL, file: GitFile, onAPIError: @escaping (Error) -> Void) {
+        self.path = path
         self.file = file
         self.apiClient = APIClient(baseURL: server)
         self.onAPIError = onAPIError
@@ -144,16 +144,16 @@ struct GitDiffView: View {
     }
 
     private func load() async {
-        guard let sessionID = session.sessionId else {
-            errorMessage = String(localized: "Session ID is missing.")
+        guard !path.isEmpty else {
+            errorMessage = String(localized: "Workspace path is missing.")
             return
         }
         isLoading = true
         errorMessage = nil
         do {
             diff = try await apiClient.gitDiff(
-                sessionID: sessionID,
-                path: file.displayPath,
+                path: path,
+                file: file.displayPath,
                 kind: file.preferredDiffKind
             ).diff
         } catch {

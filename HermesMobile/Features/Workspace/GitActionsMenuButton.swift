@@ -3,7 +3,6 @@ import SwiftUI
 struct GitActionsMenuButton: View {
     let presentation: GitToolbarPresentation
     let isEnabled: Bool
-    let fetchDisabled: Bool
     let writesDisabled: Bool
     let isRunningAction: Bool
     let onTap: () -> Void
@@ -11,8 +10,6 @@ struct GitActionsMenuButton: View {
     let onStageEdit: () -> Void
     let onCommit: () -> Void
     let onCommitAndPush: () -> Void
-    let onFetch: () -> Void
-    let onPull: () -> Void
     let onPush: () -> Void
 
     private var hasChanges: Bool {
@@ -46,18 +43,6 @@ struct GitActionsMenuButton: View {
 
                 HapticButton(feedbackStyle: .medium, action: onPush) {
                     Label("Push", systemImage: "arrow.up.circle")
-                }
-                .disabled(writesDisabled || isRunningAction)
-            }
-
-            Section("Update") {
-                HapticButton(feedbackStyle: .medium, action: onFetch) {
-                    Label("Fetch", systemImage: "arrow.trianglehead.2.clockwise.rotate.90")
-                }
-                .disabled(fetchDisabled || isRunningAction)
-
-                HapticButton(feedbackStyle: .medium, action: onPull) {
-                    Label("Pull", systemImage: "arrow.down.circle")
                 }
                 .disabled(writesDisabled || isRunningAction)
             }

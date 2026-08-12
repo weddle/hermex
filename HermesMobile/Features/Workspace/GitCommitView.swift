@@ -7,7 +7,7 @@ import SwiftUI
 /// optional push afterwards. All write actions are disabled while the chat is streaming or
 /// viewing cached data; "Suggest message" stays available because it is a read-only call.
 struct GitCommitView: View {
-    private let session: SessionSummary
+    private let path: String
     private let server: URL
     let writesDisabled: Bool
     let onAPIError: (Error) -> Void
@@ -21,18 +21,18 @@ struct GitCommitView: View {
     @Environment(\.dismiss) private var dismiss
 
     init(
-        session: SessionSummary,
+        path: String,
         server: URL,
         writesDisabled: Bool,
         onAPIError: @escaping (Error) -> Void,
         onCommitted: @escaping () -> Void
     ) {
-        self.session = session
+        self.path = path
         self.server = server
         self.writesDisabled = writesDisabled
         self.onAPIError = onAPIError
         self.onCommitted = onCommitted
-        _viewModel = State(initialValue: GitCommitViewModel(session: session, server: server))
+        _viewModel = State(initialValue: GitCommitViewModel(path: path, server: server))
     }
 
     var body: some View {
@@ -116,14 +116,6 @@ struct GitCommitView: View {
                         onTap: { viewModel.toggleSelection(file) }
                     )
                 }
-
-                if viewModel.status?.truncated == true {
-                    Text("Showing first 500 changed files.")
-                        .font(AppFont.footnote())
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.vertical, 6)
-                }
             }
             .padding(16)
         }
@@ -191,27 +183,6 @@ struct GitCommitView: View {
                     .font(AppFont.mono(style: .subheadline))
                     .lineLimit(1...4)
                     .textFieldStyle(.roundedBorder)
-
-                Button {
-                    HapticButtonHaptics.tap(isEnabled: isHapticsEnabled)
-                    Task { await viewModel.suggestMessage() }
-                } label: {
-                    if viewModel.busyOperation == .suggesting {
-                        ProgressView().controlSize(.small).frame(width: 22)
-                    } else {
-                        Image(systemName: "sparkles")
-                    }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
-                .disabled(viewModel.isBusy || !viewModel.hasChanges)
-                .accessibilityLabel("Suggest commit message")
-            }
-
-            if viewModel.messageWasTruncated {
-                Text("Diff was large; message may be partial.")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
             }
 
             Toggle("Push after commit", isOn: $pushAfterCommit)
@@ -256,17 +227,13 @@ struct GitCommitView: View {
         writesDisabled || viewModel.isBusy || viewModel.trimmedMessage.isEmpty
     }
 
-    /// True when discarding the targets can delete a file from disk — i.e. any new file:
-    /// untracked, or a staged add/rename (which discard turns into an untracked file to
-    /// delete once it is unstaged). Drives the stronger "deletes files" confirmation copy
-    /// and the `deleteUntracked` flag, so the server never rejects the discard.
+    /// True when discarding the targets can delete a file from disk — i.e. any
+    /// untracked file. The native revert always removes untracked files it discards.
     private var discardIncludesUntracked: Bool {
         let targets = viewModel.hasSelection
             ? viewModel.trackedFiles.filter { viewModel.isSelected($0) }
             : viewModel.trackedFiles
-        return targets.contains {
-            $0.untracked == true || $0.changeKind == .added || $0.changeKind == .renamed
-        }
+        return targets.contains { $0.untracked == true }
     }
 
     private func runCommit(_ commit: @escaping () async -> Bool) async {

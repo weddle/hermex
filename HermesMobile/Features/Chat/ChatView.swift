@@ -17,7 +17,6 @@ private enum GitChatAlert: Identifiable {
         }
     }
 }
-
 private enum ActiveGitSheet: Identifiable {
     case changes
     case commit
@@ -200,9 +199,27 @@ struct ChatView: View {
             )
         ))
         _gitAvailabilityViewModel = State(initialValue: GitWorkspaceAvailabilityViewModel(
-            session: session,
+            path: Self.gitPath(for: session),
             server: server
         ))
+    }
+
+    /// The absolute working-directory path the native git router runs against, derived
+    /// from the session's workspace (falling back to the worktree path). Empty when the
+    /// session carries no path — git controls then stay hidden.
+    private static func gitPath(for session: SessionSummary) -> String {
+        let candidates = [session.workspace, session.worktreePath]
+        for candidate in candidates {
+            if let trimmed = self.nonEmpty(candidate) {
+                return trimmed
+            }
+        }
+        return ""
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     // Extracted from `body` so the type-checker doesn't have to solve the whole composer
@@ -610,10 +627,10 @@ struct ChatView: View {
     private func gitSheet(_ sheet: ActiveGitSheet) -> some View {
         switch sheet {
         case .changes:
-            GitWorkspaceView(session: session, server: server, onAPIError: onAPIError)
+            GitWorkspaceView(path: Self.gitPath(for: session), server: server, onAPIError: onAPIError)
         case .commit:
             GitCommitView(
-                session: session,
+                path: Self.gitPath(for: session),
                 server: server,
                 writesDisabled: gitWriteAvailability.writesDisabled,
                 onAPIError: onAPIError,
@@ -628,9 +645,9 @@ struct ChatView: View {
     private func turnDiffSheet(_ presentation: TurnDiffPresentation) -> some View {
         switch presentation {
         case .turnFiles(let files):
-            GitTurnDiffSheet(session: session, server: server, files: files, onAPIError: onAPIError)
+            GitTurnDiffSheet(path: Self.gitPath(for: session), server: server, files: files, onAPIError: onAPIError)
         case .file(let file):
-            GitDiffView(session: session, server: server, file: file, onAPIError: onAPIError)
+            GitDiffView(path: Self.gitPath(for: session), server: server, file: file, onAPIError: onAPIError)
         }
     }
 
@@ -639,12 +656,11 @@ struct ChatView: View {
             presentation: GitToolbarPresentation(
                 hasRepository: gitAvailabilityViewModel.hasRepository,
                 isLoading: gitAvailabilityViewModel.isLoading || gitAvailabilityViewModel.isStatusLoading,
-                info: gitAvailabilityViewModel.gitInfo,
+                info: gitAvailabilityViewModel.status,
                 status: gitAvailabilityViewModel.status,
                 statusFailed: gitAvailabilityViewModel.statusError != nil
             ),
             isEnabled: !viewModel.isViewingCachedData,
-            fetchDisabled: gitWriteAvailability.fetchDisabled,
             writesDisabled: gitWriteAvailability.writesDisabled,
             isRunningAction: gitAvailabilityViewModel.isRunningGitAction,
             onTap: {
@@ -661,12 +677,6 @@ struct ChatView: View {
             },
             onCommitAndPush: {
                 Task { await performQuickCommit(push: true) }
-            },
-            onFetch: {
-                Task { await performGitRemoteAction(.fetch) }
-            },
-            onPull: {
-                gitAlert = .confirmRemote(.pull)
             },
             onPush: {
                 gitAlert = .confirmRemote(.push)
@@ -718,11 +728,15 @@ struct ChatView: View {
 
         let branch = gitAvailabilityViewModel.currentBranchName
         gitToastState.showProgress(GitActionProgress(
-            title: GitCommitPhase.generatingMessage.progressTitle,
+            title: GitCommitPhase.committing.progressTitle,
             subtitle: branch
         ))
 
-        let outcome = await gitAvailabilityViewModel.quickCommit(push: push) { phase in
+        // LLM commit-message generation was removed with the WebUI backend; quick-commit
+        // uses a short conventional default the user can edit in the staging sheet.
+        let message = Self.defaultCommitMessage(branch: branch)
+
+        let outcome = await gitAvailabilityViewModel.quickCommit(push: push, message: message) { phase in
             gitToastState.showProgress(GitActionProgress(
                 title: phase.progressTitle,
                 subtitle: gitAvailabilityViewModel.currentBranchName
@@ -732,33 +746,17 @@ struct ChatView: View {
         switch outcome {
         case .success(let result):
             var detailLines: [String] = []
-            if let sha = result.shortSHA { detailLines.append(String(localized: "Commit \(sha)")) }
-            if result.truncatedMessage { detailLines.append(String(localized: "Diff was large; message may be partial.")) }
-            if let pushError = result.pushFailureMessage {
-                // The commit landed but the requested push failed — report partial success
-                // so the user knows the local commit is safe and only the push needs retrying.
-                detailLines.append(String(localized: "Push failed: \(pushError)"))
-            }
+            if let message = result.message { detailLines.append(message) }
             gitToastState.showSuccess(GitActionSuccess(
-                title: result.pushFailureMessage != nil
-                    ? String(localized: "Committed — push failed")
-                    : (result.didPush ? String(localized: "Commit & push complete") : String(localized: "Commit complete")),
+                title: result.didPush
+                    ? String(localized: "Commit & push complete")
+                    : String(localized: "Commit complete"),
                 subtitle: result.branch,
                 detailLines: detailLines
             ))
         case .nothingToCommit:
             gitToastState.dismissProgress()
             gitAlert = .error(String(localized: "There are no changes to commit."))
-        case .tooManyChanges:
-            // Status was truncated (>500 files): the commit was blocked to avoid silently
-            // dropping files 501+. Always surface a message — falling back to a hardcoded
-            // string if the view model ever leaves actionErrorMessage unset — because a
-            // blocked commit with no feedback would be the very silent failure this guards
-            // against. (Kept separate from .failure, which intentionally stays quiet when its
-            // busy/no-session guard returns with no message.) No success toast/SHA.
-            gitToastState.dismissProgress()
-            gitAlert = .error(gitAvailabilityViewModel.actionErrorMessage
-                ?? String(localized: "Too many changes to quick-commit. Commit in smaller batches, or use git directly."))
         case .failure:
             gitToastState.dismissProgress()
             if let message = gitAvailabilityViewModel.actionErrorMessage {
@@ -767,16 +765,28 @@ struct ChatView: View {
         }
     }
 
+    /// Short conventional default commit subject for the one-tap commit flow.
+    private static func defaultCommitMessage(branch: String) -> String {
+        let trimmed = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "Update changes" }
+        return "Update \(trimmed)"
+    }
+
     @MainActor
-    private func performGitCheckout(_ target: GitCheckoutTarget, stashingChanges: Bool = false) async {
-        let outcome = await gitAvailabilityViewModel.checkout(target, stashingChanges: stashingChanges)
-        if outcome == .requiresStash {
-            gitAlert = .dirtyCheckout(target)
-        } else if let message = gitAvailabilityViewModel.actionErrorMessage {
-            // Surface real failures and partial successes (branch switched but the
-            // stashed changes could not be restored) — the view model sets
-            // actionErrorMessage in both cases and clears it on every new checkout.
-            gitAlert = .error(message)
+    private func performGitCheckout(_ target: GitCheckoutTarget) async {
+        let outcome = await gitAvailabilityViewModel.checkout(target)
+        switch outcome {
+        case .requiresStash:
+            // The native router has no stash-checkout; a dirty-tree switch is surfaced
+            // as an error telling the user to commit/discard first.
+            gitAlert = .error(gitAvailabilityViewModel.actionErrorMessage
+                ?? String(localized: "This workspace has uncommitted changes. Commit or discard them before switching branches."))
+        case .failure:
+            if let message = gitAvailabilityViewModel.actionErrorMessage {
+                gitAlert = .error(message)
+            }
+        case .success:
+            break
         }
     }
 
@@ -805,23 +815,21 @@ struct ChatView: View {
 
     private func gitAlertPresentation(_ alert: GitChatAlert) -> Alert {
         switch alert {
-        case .confirmRemote(let action):
+        case .confirmRemote:
             return Alert(
-                title: Text(action == .pull ? "Pull Remote Changes?" : "Push Local Commits?"),
-                message: Text(action == .pull
-                    ? "Pull uses fast-forward only and will not create a merge commit."
-                    : "Push the current branch to its configured upstream remote?"),
-                primaryButton: .default(Text(action == .pull ? "Pull" : "Push")) {
-                    Task { await performGitRemoteAction(action) }
+                title: Text("Push Local Commits?"),
+                message: Text("Push the current branch to its configured upstream remote?"),
+                primaryButton: .default(Text("Push")) {
+                    Task { await performGitRemoteAction(.push) }
                 },
                 secondaryButton: .cancel()
             )
         case .dirtyCheckout(let target):
             return Alert(
                 title: Text("Uncommitted Changes"),
-                message: Text("This workspace has uncommitted changes. Save them temporarily, switch branches, then restore any saved changes for the destination branch."),
-                primaryButton: .default(Text("Stash & Switch")) {
-                    Task { await performGitCheckout(target, stashingChanges: true) }
+                message: Text("This workspace has uncommitted changes. Commit or discard them before switching branches."),
+                primaryButton: .default(Text("OK")) {
+                    gitAvailabilityViewModel.clearActionError()
                 },
                 secondaryButton: .cancel()
             )
@@ -1154,7 +1162,8 @@ struct ChatView: View {
     }
 
     private func loadInitialGitAvailability() async {
-        let availabilityViewModel = GitWorkspaceAvailabilityViewModel(session: session, server: server)
+        let path = Self.gitPath(for: session)
+        let availabilityViewModel = GitWorkspaceAvailabilityViewModel(path: path, server: server)
         gitAvailabilityViewModel = availabilityViewModel
         await availabilityViewModel.loadIfNeeded()
     }

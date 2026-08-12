@@ -136,7 +136,7 @@ struct GitTurnChangesCard: View {
 /// (reusing the restyled #318 `GitDiffView`). Presented for the composer capsule tap and
 /// the recap card's "Open diff" button.
 struct GitTurnDiffSheet: View {
-    let session: SessionSummary
+    let path: String
     let server: URL
     let files: [GitFile]
     let onAPIError: (Error) -> Void
@@ -162,7 +162,7 @@ struct GitTurnDiffSheet: View {
         .presentationDetents([.medium, .large])
         .adaptivePagePresentation()
         .sheet(item: $selectedFile) { file in
-            GitDiffView(session: session, server: server, file: file, onAPIError: onAPIError)
+            GitDiffView(path: path, server: server, file: file, onAPIError: onAPIError)
         }
     }
 
