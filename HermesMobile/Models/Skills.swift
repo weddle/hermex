@@ -2,6 +2,27 @@ import Foundation
 
 struct SkillsResponse: Decodable, Equatable {
     let skills: [SkillSummary]?
+
+    init(skills: [SkillSummary]?) {
+        self.skills = skills
+    }
+
+    init(from decoder: Decoder) throws {
+        // Native GET /api/skills returns a bare array; the legacy WebUI endpoint
+        // used {skills: [...]}. Both decode into `skills`.
+        if let container = try? decoder.singleValueContainer() {
+            if let array = try? container.decode([SkillSummary].self) {
+                skills = array
+                return
+            }
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        skills = try container.decodeIfPresent([SkillSummary].self, forKey: .skills)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case skills
+    }
 }
 
 struct SkillSummary: Decodable, Equatable, Identifiable {
@@ -13,9 +34,21 @@ struct SkillSummary: Decodable, Equatable, Identifiable {
     let category: String?
     let description: String?
     let path: String?
+    /// True when the skill is OFF. Native `enabled` inverts; WebUI sent `disabled`.
     let disabled: Bool?
     let tags: [String]?
     let relatedSkills: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case category
+        case description
+        case path
+        case disabled
+        case enabled
+        case tags
+        case relatedSkills
+    }
 
     init(
         name: String?,
@@ -33,6 +66,26 @@ struct SkillSummary: Decodable, Equatable, Identifiable {
         self.disabled = disabled
         self.tags = tags
         self.relatedSkills = relatedSkills
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = container.decodeLossyStringIfPresent(forKey: .name)
+        category = container.decodeLossyStringIfPresent(forKey: .category)
+        description = container.decodeLossyStringIfPresent(forKey: .description)
+        path = container.decodeLossyStringIfPresent(forKey: .path)
+        tags = (try? container.decodeIfPresent([String].self, forKey: .tags)) ?? nil
+        relatedSkills = (try? container.decodeIfPresent([String].self, forKey: .relatedSkills)) ?? nil
+
+        let rawDisabled = container.decodeLossyBoolIfPresent(forKey: .disabled)
+        let rawEnabled = container.decodeLossyBoolIfPresent(forKey: .enabled)
+        // Native reports `enabled`; WebUI reported `disabled`. Prefer `enabled`
+        // when present (native), else fall back to `disabled`.
+        if let enabled = rawEnabled {
+            disabled = !enabled
+        } else {
+            disabled = rawDisabled
+        }
     }
 }
 
