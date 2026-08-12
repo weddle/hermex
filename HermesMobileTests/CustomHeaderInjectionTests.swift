@@ -195,19 +195,16 @@ final class CustomHeaderAPIClientInjectionTests: APIClientTestCase {
         _ = try? await client.sessions()
     }
 
-    func testUploadRequestCarriesCustomHeadersAndMultipartContentTypeWins() async throws {
+    func testUploadRequestCarriesCustomHeadersAndJSONContentTypeWins() async throws {
         let (client, _) = makeHeaderClient([
             CustomHeader(name: "Authorization", value: "Bearer upload"),
             CustomHeader(name: "Content-Type", value: "application/evil")
         ]) { request in
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer upload")
-            // The built-in multipart Content-Type is set after the custom
-            // headers, so it wins its key.
-            XCTAssertEqual(
-                request.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("multipart/form-data; boundary="),
-                true
-            )
-            return try self.ok(request)
+            // The native upload is a JSON POST (path/data_url/overwrite); the built-in
+            // Content-Type is set after the custom headers, so it wins its key.
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+            return try self.ok(request, body: #"{"ok": true, "entry": {"name": "a.png", "path": "a.png", "size": 5, "mime_type": "image/png"}}"#)
         }
 
         _ = try? await client.uploadFile(sessionID: "s1", data: Data("bytes".utf8), filename: "a.png")

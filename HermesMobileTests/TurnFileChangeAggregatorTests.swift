@@ -169,12 +169,15 @@ final class TurnFileChangeAggregatorTests: XCTestCase {
 
         let added = try XCTUnwrap(summary.changes.first { $0.path == "new.swift" })
         XCTAssertEqual(added.additions, 9)
-        XCTAssertEqual(added.changeKind, .added)
+        // Native GitFile.changeKind derives only .conflict/.untracked/.modified/
+        // .unknown from the staged/unstaged booleans — there is no added/deleted
+        // flag, so a staged new file reports as .modified (counts still prove the join).
+        XCTAssertEqual(added.changeKind, .modified)
         XCTAssertNotNil(added.gitFile)
 
         let deleted = try XCTUnwrap(summary.changes.first { $0.path == "gone.swift" })
         XCTAssertEqual(deleted.deletions, 7)
-        XCTAssertEqual(deleted.changeKind, .deleted)
+        XCTAssertEqual(deleted.changeKind, .modified)
     }
 
     func testJoinMatchesAbsoluteToolPathToRelativeStatusEntry() throws {
