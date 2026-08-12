@@ -160,7 +160,7 @@ final class GatewayTransportTests: XCTestCase {
         let frame = try await sendFrames.firstFrame()
         let requestID = try Self.requestID(from: frame)
         client.testDeliverFrame(Self.errorResponseFrame(id: requestID, code: -32000, message: "session not found"))
-        await resumeTask.value
+        try await resumeTask.value
     }
 
     // MARK: - Event parsing (StreamEventParser)

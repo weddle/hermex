@@ -2,7 +2,7 @@ import XCTest
 @testable import HermesMobile
 
 final class ChatComposerConfigLoaderTests: APIClientTestCase {
-    func testLoadUsesSessionProfileDefaultAndRefreshesCommands() async throws {
+    func testLoadUsesSessionProfileDefault() async throws {
         let openRouterModel = "deepseek/deepseek-chat-v3-0324:free"
         var requestPaths: [String] = []
         let client = makeClient { request in
@@ -52,8 +52,6 @@ final class ChatComposerConfigLoaderTests: APIClientTestCase {
                 return apiTestJSONResponse(#"{"reasoning_effort": "medium"}"#, for: request)
             case "/api/workspaces":
                 return apiTestJSONResponse(#"{"workspaces": [{"path": "/tmp/workspace"}], "last": "/tmp/workspace"}"#, for: request)
-            case "/api/commands":
-                return apiTestJSONResponse(#"{"commands": [{"name": "status", "description": "Show status"}]}"#, for: request)
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
@@ -75,14 +73,12 @@ final class ChatComposerConfigLoaderTests: APIClientTestCase {
         XCTAssertNil(result.state.supportedReasoningEfforts)
         XCTAssertNil(result.state.supportsReasoningEffort)
         XCTAssertEqual(result.state.workspaceSuggestions, ["/tmp/workspace"])
-        XCTAssertEqual(result.state.agentCommands.map(\.name), ["status"])
         XCTAssertEqual(requestPaths, [
             "/api/profiles",
             "/api/profile/switch",
             "/api/models",
             "/api/reasoning",
-            "/api/workspaces",
-            "/api/commands"
+            "/api/workspaces"
         ])
     }
 
@@ -166,7 +162,7 @@ final class ChatComposerConfigLoaderTests: APIClientTestCase {
         XCTAssertEqual(result.state.supportsReasoningEffort, true)
     }
 
-    func testLoadReturnsPartialStateAndStillRefreshesCommandsWhenConfigurationFails() async throws {
+    func testLoadReturnsPartialStateWhenConfigurationFails() async throws {
         var requestPaths: [String] = []
         let client = makeClient { request in
             requestPaths.append(request.url?.path ?? "")
@@ -189,8 +185,6 @@ final class ChatComposerConfigLoaderTests: APIClientTestCase {
                     headerFields: ["Content-Type": "application/json"]
                 )
                 return (try XCTUnwrap(response), Data(#"{"error":"models unavailable"}"#.utf8))
-            case "/api/commands":
-                return apiTestJSONResponse(#"{"commands": [{"name": "status"}]}"#, for: request)
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
@@ -206,8 +200,7 @@ final class ChatComposerConfigLoaderTests: APIClientTestCase {
         XCTAssertEqual(result.state.profileOptions.map(\.name), ["default"])
         XCTAssertEqual(result.state.currentModel, "gpt-5.4")
         XCTAssertNil(result.state.currentModelProvider)
-        XCTAssertEqual(result.state.agentCommands.map(\.name), ["status"])
-        XCTAssertEqual(requestPaths, ["/api/profiles", "/api/models", "/api/commands"])
+        XCTAssertEqual(requestPaths, ["/api/profiles", "/api/models"])
     }
 
     func testLoadStoresSingleProfileModeFromProfilesResponse() async throws {

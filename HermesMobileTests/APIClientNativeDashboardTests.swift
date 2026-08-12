@@ -222,9 +222,9 @@ final class APIClientNativeDashboardTests: APIClientTestCase {
         let response = try await client.session(id: "session-abc", includeMessages: true)
 
         XCTAssertEqual(requestedPaths, ["/api/sessions/session-abc", "/api/sessions/session-abc/messages"])
-        XCTAssertEqual(response.session.sessionId, "session-abc")
-        XCTAssertEqual(response.session.title, "Planning")
-        XCTAssertEqual(response.session.messages?.count, 2)
+        XCTAssertEqual(response.session?.sessionId, "session-abc")
+        XCTAssertEqual(response.session?.title, "Planning")
+        XCTAssertEqual(response.session?.messages?.count, 2)
     }
 
     func testSessionMutationUsesSessionPatchPath() async throws {

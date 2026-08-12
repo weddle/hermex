@@ -146,56 +146,6 @@ final class APIClientSessionMutationTests: APIClientTestCase {
         XCTAssertEqual(asciiSummary.compressedTokenEstimate, 320)
     }
 
-    func testUndoSessionBuildsExpectedBodyAndDecodesResponse() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/session/undo")
-
-            let body = try XCTUnwrap(apiTestBodyData(from: request))
-            let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
-            XCTAssertEqual(json?["session_id"] as? String, "abc123")
-            XCTAssertNil(json?["sessionId"])
-
-            return apiTestJSONResponse("""
-            {
-              "ok": true,
-              "removed_count": 2,
-              "removed_preview": "Summarize the logs"
-            }
-            """, for: request)
-        }
-
-        let response = try await client.undoSession(id: "abc123")
-
-        XCTAssertEqual(response.ok, true)
-        XCTAssertEqual(response.removedCount, 2)
-        XCTAssertEqual(response.removedPreview, "Summarize the logs")
-    }
-
-    func testRetrySessionBuildsExpectedBodyAndDecodesResponse() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/session/retry")
-
-            let body = try XCTUnwrap(apiTestBodyData(from: request))
-            let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
-            XCTAssertEqual(json?["session_id"] as? String, "abc123")
-            XCTAssertNil(json?["sessionId"])
-
-            return apiTestJSONResponse("""
-            {
-              "ok": true,
-              "last_user_text": "Summarize the logs",
-              "removed_count": 2
-            }
-            """, for: request)
-        }
-
-        let response = try await client.retrySession(id: "abc123")
-
-        XCTAssertEqual(response.ok, true)
-        XCTAssertEqual(response.lastUserText, "Summarize the logs")
-        XCTAssertEqual(response.removedCount, 2)
-    }
-
     func testSessionMetadataRequestOmitsMessageLimitWhenNil() async throws {
         let client = makeClient { request in
             XCTAssertEqual(request.url?.path, "/api/session")
@@ -377,38 +327,5 @@ final class APIClientSessionMutationTests: APIClientTestCase {
 
         XCTAssertEqual(response.ok, true)
         XCTAssertEqual(response.session?.archived, false)
-    }
-
-    func testTruncateSessionBuildsExpectedBodyAndDecodesResponse() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/session/truncate")
-            XCTAssertEqual(request.httpMethod, "POST")
-
-            let data = try XCTUnwrap(apiTestBodyData(from: request))
-            let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            XCTAssertEqual(body?["session_id"] as? String, "session-abc")
-            XCTAssertEqual(body?["keep_count"] as? Int, 3)
-
-            return apiTestJSONResponse("""
-            {
-              "session": {
-                "session_id": "session-abc",
-                "title": "My chat",
-                "messages": [
-                  {"role": "user", "content": "Hello", "message_id": "m1"},
-                  {"role": "assistant", "content": "Hi there", "message_id": "m2"},
-                  {"role": "user", "content": "Thanks", "message_id": "m3"}
-                ],
-                "_messages_offset": 0
-              }
-            }
-            """, for: request)
-        }
-
-        let response = try await client.truncateSession(id: "session-abc", keepCount: 3)
-
-        XCTAssertEqual(response.session?.sessionId, "session-abc")
-        XCTAssertEqual(response.session?.messages?.count, 3)
-        XCTAssertEqual(response.session?.messagesOffset, 0)
     }
 }

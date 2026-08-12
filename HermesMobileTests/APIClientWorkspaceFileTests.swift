@@ -241,162 +241,14 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
         XCTAssertEqual(response.suggestions, ["/Users/test/project", "/Users/test/prototypes"])
     }
 
-    func testAddWorkspaceBuildsExpectedBodyAndDecodesUpdatedList() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/workspaces/add")
-            XCTAssertEqual(request.httpMethod, "POST")
-
-            let json = try apiTestJSONBody(from: request)
-            XCTAssertEqual(json["path"] as? String, "/Users/test/newproject")
-            XCTAssertEqual(json["name"] as? String, "New Project")
-            XCTAssertEqual(json["create"] as? Bool, true)
-
-            return apiTestJSONResponse("""
-            {
-              "ok": true,
-              "workspaces": [
-                {"path": "/Users/test/project", "name": "Project"},
-                {"path": "/Users/test/newproject", "name": "New Project"}
-              ]
-            }
-            """, for: request)
-        }
-
-        let response = try await client.addWorkspace(path: "/Users/test/newproject", name: "New Project", create: true)
-
-        XCTAssertEqual(response.ok, true)
-        XCTAssertEqual(response.workspaces?.count, 2)
-        XCTAssertEqual(response.workspaces?.last?.path, "/Users/test/newproject")
-        XCTAssertEqual(response.workspaces?.last?.name, "New Project")
-    }
-
-    func testAddWorkspaceOmitsOptionalFieldsWhenNil() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/workspaces/add")
-
-            let json = try apiTestJSONBody(from: request)
-            XCTAssertEqual(json["path"] as? String, "/Users/test/newproject")
-            XCTAssertNil(json["name"])
-            XCTAssertNil(json["create"])
-
-            return apiTestJSONResponse("""
-            {"ok": true, "workspaces": [{"path": "/Users/test/newproject", "name": "newproject"}]}
-            """, for: request)
-        }
-
-        let response = try await client.addWorkspace(path: "/Users/test/newproject")
-
-        XCTAssertEqual(response.ok, true)
-    }
-
-    func testAddWorkspaceSurfacesServerErrorString() async throws {
-        let client = makeClient { request in
-            let (_, data) = apiTestJSONResponse("""
-            {"error": "Workspace already in list"}
-            """, for: request)
-            let response = HTTPURLResponse(
-                url: request.url!,
-                statusCode: 400,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "application/json"]
-            )!
-            return (response, data)
-        }
-
-        do {
-            _ = try await client.addWorkspace(path: "/Users/test/project")
-            XCTFail("Expected APIError.http")
-        } catch let error as APIError {
-            XCTAssertEqual(error.serverMessage, "Workspace already in list")
-            XCTAssertTrue(error.localizedDescription.contains("Workspace already in list"))
-        }
-    }
-
-    func testRemoveWorkspaceBuildsExpectedBodyAndDecodesUpdatedList() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/workspaces/remove")
-            XCTAssertEqual(request.httpMethod, "POST")
-
-            let json = try apiTestJSONBody(from: request)
-            XCTAssertEqual(json["path"] as? String, "/Users/test/oldproject")
-
-            return apiTestJSONResponse("""
-            {"ok": true, "workspaces": [{"path": "/Users/test/project", "name": "Project"}]}
-            """, for: request)
-        }
-
-        let response = try await client.removeWorkspace(path: "/Users/test/oldproject")
-
-        XCTAssertEqual(response.ok, true)
-        XCTAssertEqual(response.workspaces?.map(\.path), ["/Users/test/project"])
-    }
-
-    func testRenameWorkspaceBuildsExpectedBodyAndDecodesUpdatedList() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/workspaces/rename")
-            XCTAssertEqual(request.httpMethod, "POST")
-
-            let json = try apiTestJSONBody(from: request)
-            XCTAssertEqual(json["path"] as? String, "/Users/test/project")
-            XCTAssertEqual(json["name"] as? String, "Renamed")
-
-            return apiTestJSONResponse("""
-            {"ok": true, "workspaces": [{"path": "/Users/test/project", "name": "Renamed"}]}
-            """, for: request)
-        }
-
-        let response = try await client.renameWorkspace(path: "/Users/test/project", name: "Renamed")
-
-        XCTAssertEqual(response.ok, true)
-        XCTAssertEqual(response.workspaces?.first?.name, "Renamed")
-    }
-
-    func testReorderWorkspacesBuildsExpectedBodyAndDecodesUpdatedList() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/workspaces/reorder")
-            XCTAssertEqual(request.httpMethod, "POST")
-
-            let json = try apiTestJSONBody(from: request)
-            XCTAssertEqual(json["paths"] as? [String], ["/Users/test/b", "/Users/test/a"])
-
-            return apiTestJSONResponse("""
-            {
-              "ok": true,
-              "workspaces": [
-                {"path": "/Users/test/b", "name": "B"},
-                {"path": "/Users/test/a", "name": "A"}
-              ]
-            }
-            """, for: request)
-        }
-
-        let response = try await client.reorderWorkspaces(paths: ["/Users/test/b", "/Users/test/a"])
-
-        XCTAssertEqual(response.ok, true)
-        XCTAssertEqual(response.workspaces?.compactMap(\.path), ["/Users/test/b", "/Users/test/a"])
-    }
-
-    func testWorkspaceMutationToleratesMissingWorkspacesEcho() async throws {
-        let client = makeClient { request in
-            apiTestJSONResponse("""
-            {"ok": true, "unexpected_new_field": {"nested": 1}}
-            """, for: request)
-        }
-
-        let response = try await client.removeWorkspace(path: "/Users/test/project")
-
-        XCTAssertEqual(response.ok, true)
-        XCTAssertNil(response.workspaces)
-    }
-
     func testDirectoryListDecodesUpstreamEntries() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/list")
+            XCTAssertEqual(request.url?.path, "/api/fs/list")
 
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
-            XCTAssertEqual(query["session_id"], "abc123")
             XCTAssertEqual(query["path"], ".")
+            XCTAssertNil(query["session_id"])
 
             return apiTestJSONResponse("""
             {
@@ -410,7 +262,7 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
             """, for: request)
         }
 
-        let response = try await client.directoryList(sessionID: "abc123", path: ".")
+        let response = try await client.directoryList(path: ".")
 
         XCTAssertEqual(response.path, ".")
         XCTAssertEqual(response.entries?.count, 3)
@@ -423,12 +275,12 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
 
     func testDirectoryListBuildsNestedPathQuery() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/list")
+            XCTAssertEqual(request.url?.path, "/api/fs/list")
 
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
-            XCTAssertEqual(query["session_id"], "abc123")
             XCTAssertEqual(query["path"], "Sources/App")
+            XCTAssertNil(query["session_id"])
 
             return apiTestJSONResponse("""
             {
@@ -438,7 +290,7 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
             """, for: request)
         }
 
-        let response = try await client.directoryList(sessionID: "abc123", path: "Sources/App")
+        let response = try await client.directoryList(path: "Sources/App")
 
         XCTAssertEqual(response.path, "Sources/App")
     }
@@ -545,12 +397,12 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
 
     func testFileReadBuildsExpectedQueryAndDecodesTextResponse() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/file")
+            XCTAssertEqual(request.url?.path, "/api/fs/read-text")
 
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
-            XCTAssertEqual(query["session_id"], "abc123")
             XCTAssertEqual(query["path"], "Sources/App/FilePreviewView.swift")
+            XCTAssertNil(query["session_id"])
 
             return apiTestJSONResponse("""
             {
@@ -563,7 +415,7 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
             """, for: request)
         }
 
-        let response = try await client.file(sessionID: "abc123", path: "Sources/App/FilePreviewView.swift")
+        let response = try await client.file(path: "Sources/App/FilePreviewView.swift")
 
         XCTAssertEqual(response.path, "Sources/App/FilePreviewView.swift")
         XCTAssertEqual(response.content, "import SwiftUI\n")
@@ -573,7 +425,7 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
 
     func testFileReadToleratesMissingOptionalMetadata() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/file")
+            XCTAssertEqual(request.url?.path, "/api/fs/read-text")
 
             return apiTestJSONResponse("""
             {
@@ -582,7 +434,7 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
             """, for: request)
         }
 
-        let response = try await client.file(sessionID: "abc123", path: "README.md")
+        let response = try await client.file(path: "README.md")
 
         XCTAssertEqual(response.content, "hello")
         XCTAssertNil(response.path)
@@ -593,12 +445,12 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
     func testRawFileBuildsExpectedQueryAndReturnsBytes() async throws {
         let expectedData = Data([0x89, 0x50, 0x4E, 0x47])
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/file/raw")
+            XCTAssertEqual(request.url?.path, "/api/files/download")
 
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
-            XCTAssertEqual(query["session_id"], "abc123")
             XCTAssertEqual(query["path"], "Screenshots/result.png")
+            XCTAssertNil(query["session_id"])
 
             let response = HTTPURLResponse(
                 url: try XCTUnwrap(request.url),
@@ -609,7 +461,7 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
             return (try XCTUnwrap(response), expectedData)
         }
 
-        let response = try await client.rawFileData(sessionID: "abc123", path: "Screenshots/result.png")
+        let response = try await client.rawFileData(path: "Screenshots/result.png")
 
         XCTAssertEqual(response, expectedData)
     }
@@ -617,15 +469,14 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
     func testMediaDataBuildsExpectedQueryAndReturnsBytes() async throws {
         let expectedData = Data([0x89, 0x50, 0x4E, 0x47])
         let mediaPath = "/Users/hermes/.hermes/browser_screenshots/result image.png"
-        let sessionID = "abc123"
         let client = makeClient { request in
             XCTAssertEqual(request.httpMethod, "GET")
-            XCTAssertEqual(request.url?.path, "/api/media")
+            XCTAssertEqual(request.url?.path, "/api/files/download")
 
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
-            XCTAssertEqual(query["session_id"], sessionID)
             XCTAssertEqual(query["path"], mediaPath)
+            XCTAssertNil(query["session_id"])
 
             let response = HTTPURLResponse(
                 url: try XCTUnwrap(request.url),
@@ -636,7 +487,7 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
             return (try XCTUnwrap(response), expectedData)
         }
 
-        let response = try await client.mediaData(sessionID: sessionID, path: mediaPath)
+        let response = try await client.mediaData(path: mediaPath)
 
         XCTAssertEqual(response, expectedData)
     }
@@ -644,7 +495,7 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
     @MainActor
     func testFilePreviewExportPayloadUsesLoadedTextContent() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/file")
+            XCTAssertEqual(request.url?.path, "/api/fs/read-text")
 
             return apiTestJSONResponse("""
             {
@@ -677,11 +528,11 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
         var requestedPaths: [String] = []
         let client = makeClient { request in
             requestedPaths.append(request.url?.path ?? "nil")
-            XCTAssertEqual(request.url?.path, "/api/file/raw")
+            XCTAssertEqual(request.url?.path, "/api/files/download")
 
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
-            XCTAssertEqual(query["session_id"], "session-abc")
+            XCTAssertNil(query["session_id"])
             XCTAssertEqual(query["path"], "Build/archive.zip")
 
             let response = HTTPURLResponse(
