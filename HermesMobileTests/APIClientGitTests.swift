@@ -140,12 +140,13 @@ final class APIClientGitTests: APIClientTestCase {
             XCTAssertEqual(q["path"], "/tmp/repo")
             XCTAssertNil(q["session_id"])
 
-            // The native route returns a bare array of branch refs.
+            // The app decodes `GitBranchesResponse` (keyed), with the native router's
+            // bare-array value unwrapped by `GitBranches`' single-value decoder.
             return apiTestJSONResponse("""
-            [
+            {"branches": [
               {"name": "main", "checked_out": true, "is_default": true, "worktree_path": null, "future_field": true},
               {"name": "dev", "checked_out": false, "is_default": false, "worktree_path": null}
-            ]
+            ]}
             """, for: request)
         }
 

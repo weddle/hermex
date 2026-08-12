@@ -6,7 +6,10 @@ import XCTest
 /// git call runs against `/api/git/{…}?path=` / `{path, …}` bodies.
 final class GitWorkspaceViewModelTests: APIClientTestCase {
 
-    private static let statusWithIgnored = """
+    /// The native status model has no ignored-file concept (`GitFile.isIgnoredFile`
+    /// is always false), so `trackedFiles` includes every server-reported file and
+    /// totals sum across all of them.
+    private static let statusWithUntracked = """
     {
       "git": {
         "branch": "main",
@@ -36,11 +39,12 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
     // MARK: - GitWorkspaceViewModel (read-only status)
 
     @MainActor
-    func testLoadExcludesIgnoredFilesFromCountsAndTotals() async throws {
+    func testLoadKeepsAllServerReportedFilesAndSumsTotals() async throws {
         let client = makeClient { request in
             XCTAssertEqual(request.url?.path, "/api/git/status")
             XCTAssertEqual(try? URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "path" })?.value, "/tmp/s1")
-            return apiTestJSONResponse(Self.statusWithIgnored, for: request)
+            XCTAssertNil(try? URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "session_id" })?.value)
+            return apiTestJSONResponse(Self.statusWithUntracked, for: request)
         }
         let viewModel = GitWorkspaceViewModel(path: "/tmp/s1", server: URL(string: "https://example.test")!, apiClient: client)
 
@@ -50,7 +54,9 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
         XCTAssertFalse(viewModel.isNonRepository)
         let status = try XCTUnwrap(viewModel.status)
         XCTAssertEqual(status.files?.count, 2)
-        XCTAssertEqual(status.trackedFiles.count, 1)
+        // No ignored concept in the native model: every reported file is tracked.
+        XCTAssertEqual(status.trackedFiles.count, 2)
+        XCTAssertEqual(status.trackedFiles.map(\.path), ["a.swift", ".DS_Store"])
         XCTAssertEqual(status.changedCount, 1)
         XCTAssertEqual(status.totalAdditions, 3)
         XCTAssertEqual(status.totalDeletions, 1)
@@ -61,13 +67,13 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
     func testRefreshReplacesStaleData() async throws {
         var dirty = true
         let client = makeClient { request in
-            let json = dirty ? Self.statusWithIgnored : self.statusJSON(branch: "main")
+            let json = dirty ? Self.statusWithUntracked : self.statusJSON(branch: "main")
             return apiTestJSONResponse(json, for: request)
         }
         let viewModel = GitWorkspaceViewModel(path: "/tmp/s1", server: URL(string: "https://example.test")!, apiClient: client)
 
         await viewModel.load()
-        XCTAssertEqual(viewModel.status?.trackedFiles.count, 1)
+        XCTAssertEqual(viewModel.status?.trackedFiles.count, 2)
 
         dirty = false
         await viewModel.load()
@@ -135,8 +141,26 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
         XCTAssertNil(viewModel.errorMessage)
     }
 
+    /// The native router reports a non-repo as an empty status dict (no `changed`
+    /// count, no files) rather than a `git: null` payload. `isNonRepository` is
+    /// derived from that decoded empty status and drives the "Not a Git Repository"
+    /// UI, even though a decoded status always decodes `isGit == true`.
     @MainActor
     func testNonRepositoryWorkspaceSetsEmptyState() async throws {
+        let client = makeClient { request in
+            apiTestJSONResponse(#"{"git": {"branch": null, "files": []}}"#, for: request)
+        }
+        let viewModel = GitWorkspaceViewModel(path: "/tmp/s1", server: URL(string: "https://example.test")!, apiClient: client)
+
+        await viewModel.load()
+
+        XCTAssertNotNil(viewModel.status)
+        XCTAssertTrue(viewModel.isNonRepository)
+        XCTAssertNil(viewModel.errorMessage)
+    }
+
+    @MainActor
+    func testNullGitPayloadIsUnknownStateNotNonRepository() async throws {
         let client = makeClient { request in
             apiTestJSONResponse(#"{"git": null}"#, for: request)
         }
@@ -144,7 +168,9 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
 
         await viewModel.load()
 
-        XCTAssertTrue(viewModel.isNonRepository)
+        // `git: null` decodes to `status == nil`; neither repo nor non-repo, and no error.
+        XCTAssertNil(viewModel.status)
+        XCTAssertFalse(viewModel.isNonRepository)
         XCTAssertFalse(viewModel.hasRepository)
         XCTAssertNil(viewModel.errorMessage)
     }
@@ -175,7 +201,7 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
                 return apiTestJSONResponse(self.statusJSON(branch: "main", files: #"[{"path":"a.swift","unstaged":true}]"#, changed: 1), for: request)
             case "/api/git/branches":
                 branchesLoaded = true
-                return apiTestJSONResponse(#"[{"name":"main","checked_out":true,"is_default":true,"worktree_path":null}]"#, for: request)
+                return apiTestJSONResponse(#"{"branches": [{"name":"main","checked_out":true,"is_default":true,"worktree_path":null}]}"#, for: request)
             default:
                 XCTFail("Unexpected path: \(request.url?.path ?? "nil")")
                 return apiTestJSONResponse("{}", for: request)
@@ -233,7 +259,7 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
                 return (response, Data(#"{"error": "boom"}"#.utf8))
             }
             if request.url?.path == "/api/git/branches" {
-                return apiTestJSONResponse(#"[{"name":"main","checked_out":true}]"#, for: request)
+                return apiTestJSONResponse(#"{"branches": [{"name":"main","checked_out":true}]}"#, for: request)
             }
             return apiTestJSONResponse(self.statusJSON(branch: "main"), for: request)
         }
@@ -257,7 +283,7 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
             case "/api/git/status":
                 return apiTestJSONResponse(self.statusJSON(branch: currentBranch), for: request)
             case "/api/git/branches":
-                return apiTestJSONResponse(#"[{"name":"main","checked_out":true},{"name":"feature","checked_out":false}]"#, for: request)
+                return apiTestJSONResponse(#"{"branches": [{"name":"main","checked_out":true},{"name":"feature","checked_out":false}]}"#, for: request)
             case "/api/git/branch/switch":
                 let method = request.httpMethod
                 XCTAssertEqual(method, "POST")
@@ -310,7 +336,7 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
             case "/api/git/status":
                 return apiTestJSONResponse(self.statusJSON(branch: "main"), for: request)
             case "/api/git/branches":
-                return apiTestJSONResponse(#"[{"name":"main","checked_out":true}]"#, for: request)
+                return apiTestJSONResponse(#"{"branches": [{"name":"main","checked_out":true}]}"#, for: request)
             case "/api/git/review/push":
                 XCTAssertEqual(request.httpMethod, "POST")
                 return apiTestJSONResponse(#"{"ok": true}"#, for: request)
@@ -368,7 +394,7 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
             case "/api/git/status":
                 return apiTestJSONResponse(Self.statusWithOneFile, for: request)
             case "/api/git/branches":
-                return apiTestJSONResponse(#"[{"name":"main","checked_out":true}]"#, for: request)
+                return apiTestJSONResponse(#"{"branches": [{"name":"main","checked_out":true}]}"#, for: request)
             case "/api/git/review/stage":
                 return apiTestJSONResponse(#"{"ok": true}"#, for: request)
             case "/api/git/review/commit":
