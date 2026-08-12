@@ -36,15 +36,13 @@ struct SessionMutator {
     func move(sessionID: String, to projectID: String?) async throws {
         do {
             _ = try await client.moveSession(id: sessionID, projectID: projectID)
+        } catch let error as GatewayRpcError where error.code == 4009 {
+            throw SessionMoveWhileStreamingError()
         } catch let error as APIError {
-            // Only a 503 carrying the server's JSON error payload is the documented
-            // "session is busy (streaming)" refusal; a proxy/tunnel 503 has no JSON
-            // body and keeps the generic connectivity message.
             guard case .http(let statusCode, _) = error,
                   statusCode == 503,
                   error.serverMessage != nil
             else { throw error }
-
             throw SessionMoveWhileStreamingError()
         }
     }

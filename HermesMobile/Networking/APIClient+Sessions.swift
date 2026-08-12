@@ -321,24 +321,27 @@ extension APIClient {
         )
     }
 
-    /// Creates a new session via the gateway `session.create` RPC, then hydrates
-    /// the result through the REST detail route. `workspace` maps to the RPC's
-    /// `cwd`; `model`/`modelProvider` map to `model`/`provider`.
+    /// Creates a transient gateway draft. Native Hermes persists the durable
+    /// row only when the first prompt is submitted, so the returned detail is
+    /// built directly from `session.create`; no REST read can succeed yet.
     func createSession(workspace: String?, model: String?, modelProvider: String?, profile: String?) async throws -> SessionResponse {
-        let sessionID: String = try await withGatewayConnection(profile: profile) { gateway in
-            try await gateway.createSession(
-                model: model,
-                provider: modelProvider,
-                fast: false,
-                cwd: workspace
-            )
-        }
-        guard !sessionID.isEmpty else {
-            throw APIError.decoding(underlying: DecodingError.dataCorrupted(
-                .init(codingPath: [], debugDescription: "session.create returned no session id.")
-            ))
-        }
-        return try await session(id: sessionID, includeMessages: false, messageLimit: nil)
+        let created = try await createGatewayDraft(
+            workspace: workspace,
+            model: model,
+            modelProvider: modelProvider,
+            profile: profile
+        )
+        return SessionResponse(session: SessionDetail(
+            sessionId: created.storedSessionID,
+            title: "Untitled Session",
+            workspace: created.cwd ?? workspace,
+            model: created.model ?? model,
+            modelProvider: created.provider ?? modelProvider,
+            messageCount: 0,
+            archived: false,
+            profile: profile,
+            worktreePath: created.cwd ?? workspace
+        ))
     }
 
     /// Renames a session. Native REST PATCH `/api/sessions/{id}` with `{title}`.
@@ -478,17 +481,29 @@ extension APIClient {
         return try await session(id: id, includeMessages: false, messageLimit: nil)
     }
 
-    /// Moves a session to a project via the gateway `session.workspace.move` RPC,
-    /// then re-reads the detail to refresh its project attachment.
+    /// Moves a durable session using the destination project's primary path.
+    /// Hermes derives project membership from cwd; there is no project-id move.
     func moveSession(id: String, projectID: String?) async throws -> SessionMutationResponse {
+        guard let projectID, !projectID.isEmpty else {
+            throw APIError.decoding(underlying: DecodingError.dataCorrupted(
+                .init(codingPath: [], debugDescription: "Native Hermes cannot move a session to an unassigned project bucket.")
+            ))
+        }
+        let projects = try await projects()
+        let destination = projects.projects?.first { $0.projectId == projectID }?.primaryPath
+        guard let destination, !destination.isEmpty else {
+            throw APIError.decoding(underlying: DecodingError.dataCorrupted(
+                .init(codingPath: [], debugDescription: "The destination project has no workspace path.")
+            ))
+        }
         try await withGatewayConnection(profile: nil) { gateway in
-            try await gateway.moveSession(id, toProject: projectID)
+            try await gateway.moveSession(id, toWorkspace: destination)
         }
         let response = try await self.session(id: id, includeMessages: false, messageLimit: nil)
         guard let detail = response.session else {
             return SessionMutationResponse(ok: false, session: nil, error: String(localized: "The server did not return the moved session."))
         }
-        return SessionMutationResponse(ok: true, session: SessionSummary(from: detail), error: nil)
+        return SessionMutationResponse(ok: true, session: SessionSummary(from: detail).replacingProjectID(with: projectID), error: nil)
     }
 
     /// Reads the session's approval-bypass (YOLO) state via the gateway's

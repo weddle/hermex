@@ -94,6 +94,40 @@ private final class WebSocketOpenDelegate: NSObject, URLSessionWebSocketDelegate
     }
 }
 
+struct GatewayCreatedSession: Equatable {
+    let runtimeSessionID: String
+    let storedSessionID: String
+    let cwd: String?
+    let model: String?
+    let provider: String?
+}
+
+@MainActor
+final class GatewayDraftRegistry {
+    static let shared = GatewayDraftRegistry()
+
+    struct Draft {
+        let client: HermesGatewayClient
+        let created: GatewayCreatedSession
+    }
+
+    private var drafts: [String: Draft] = [:]
+
+    func store(_ draft: Draft, baseURL: URL) {
+        let key = Self.key(baseURL: baseURL, sessionID: draft.created.storedSessionID)
+        drafts.removeValue(forKey: key)?.client.disconnect()
+        drafts[key] = draft
+    }
+
+    func take(baseURL: URL, sessionID: String) -> Draft? {
+        drafts.removeValue(forKey: Self.key(baseURL: baseURL, sessionID: sessionID))
+    }
+
+    private static func key(baseURL: URL, sessionID: String) -> String {
+        "\(baseURL.absoluteString)|\(sessionID)"
+    }
+}
+
 // MARK: - HermesGatewayClient
 
 @MainActor
@@ -395,6 +429,7 @@ final class HermesGatewayClient {
         return params.isEmpty ? nil : params
     }
 
+
     // MARK: - API Methods
 
     func healthCheck() async throws {
@@ -456,8 +491,7 @@ final class HermesGatewayClient {
         )
     }
 
-    @discardableResult
-    func createSession(model: String? = nil, provider: String? = nil, reasoningEffort: String? = nil, fast: Bool? = nil, cwd: String? = nil) async throws -> String {
+    func createSession(model: String? = nil, provider: String? = nil, reasoningEffort: String? = nil, fast: Bool? = nil, cwd: String? = nil) async throws -> GatewayCreatedSession {
         var params: [String: Any] = [
             "cols": 96,
             "source": "desktop"
@@ -470,13 +504,21 @@ final class HermesGatewayClient {
             if let provider { params["provider"] = provider }
         }
         if let reasoningEffort { params["reasoning_effort"] = reasoningEffort }
-        if let fast, fast { params["fast"] = true }
+        if let fast { params["fast"] = fast }
         if let cwd, !cwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { params["cwd"] = cwd }
         let result = try await rpc("session.create", params: params)
         let object = result.objectValue ?? [:]
-        let sessionID = object["session_id"]?.stringValue ?? ""
-        guard !sessionID.isEmpty else { throw GatewayError.invalidResponse }
-        return sessionID
+        let runtimeID = object["session_id"]?.stringValue ?? ""
+        let storedID = object["stored_session_id"]?.stringValue ?? ""
+        guard !runtimeID.isEmpty, !storedID.isEmpty else { throw GatewayError.invalidResponse }
+        let info = object["info"]?.objectValue ?? [:]
+        return GatewayCreatedSession(
+            runtimeSessionID: runtimeID,
+            storedSessionID: storedID,
+            cwd: info["cwd"]?.stringValue,
+            model: info["model"]?.stringValue,
+            provider: info["provider"]?.stringValue
+        )
     }
 
     func branchSession(parentSessionID: String, messages: [GatewayBranchMessage], title: String, cwd: String? = nil) async throws -> String {
@@ -572,14 +614,11 @@ final class HermesGatewayClient {
         try await rpc("projects.delete", params: ["id": id])
     }
 
-    func moveSession(_ sessionID: String, toProject projectID: String?) async throws {
-        var params: [String: Any] = ["session_id": sessionID]
-        if let projectID, !projectID.isEmpty {
-            params["project_id"] = projectID
-        } else {
-            params["project_id"] = NSNull()
-        }
-        _ = try await rpc("session.workspace.move", params: params)
+    func moveSession(_ sessionKey: String, toWorkspace cwd: String) async throws {
+        _ = try await rpc("session.workspace.move", params: [
+            "session_key": sessionKey,
+            "cwd": cwd
+        ])
     }
 
     /// Submits a user prompt over the gateway (`prompt.submit`).

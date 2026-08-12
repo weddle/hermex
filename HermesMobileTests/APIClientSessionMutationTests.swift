@@ -172,10 +172,7 @@ final class APIClientSessionMutationTests: APIClientTestCase {
         XCTAssertEqual(response.session?.messageCount, 4)
     }
 
-    func testMoveSessionBuildsExpectedBodyAndDecodesMovedSession() async throws {
-        // Moving goes through the gateway `session.workspace.move` RPC, then
-        // re-reads the detail via `GET /api/sessions/{id}` to refresh the
-        // project attachment.
+    func testMoveSessionUsesProjectWorkspaceAndDurableSessionKey() async throws {
         let frames = LockedStringList()
         let client = makeGatewayClient(
             handler: { request in
@@ -183,100 +180,64 @@ final class APIClientSessionMutationTests: APIClientTestCase {
                 case "/api/auth/ws-ticket":
                     return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
                 case "/api/sessions/abc123":
-                    return apiTestJSONResponse("""
-                    {
-                      "session_id": "abc123",
-                      "project_id": "proj123"
-                    }
-                    """, for: request)
+                    return apiTestJSONResponse(#"{"session_id":"abc123","cwd":"/srv/client"}"#, for: request)
                 default:
                     throw URLError(.badURL)
                 }
             },
             frames: frames,
             responses: [
-                "session.workspace.move": #"{"ok":true}"#
+                "projects.tree": #"{"projects":[{"id":"proj123","label":"Client","primary_path":"/srv/client"}]}"#,
+                "projects.project_sessions": #"{"project":{"id":"proj123","repos":[]}}"#,
+                "session.workspace.move": #"{"cwd":"/srv/client"}"#
             ]
         )
 
         let response = try await client.moveSession(id: "abc123", projectID: "proj123")
 
         XCTAssertEqual(response.ok, true)
-        XCTAssertEqual(response.session?.sessionId, "abc123")
         XCTAssertEqual(response.session?.projectId, "proj123")
-
-        let frame = try XCTUnwrap(frames.all.first)
-        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any])
-        XCTAssertEqual(json["method"] as? String, "session.workspace.move")
+        let moveFrame = try XCTUnwrap(frames.all.first { $0.contains("session.workspace.move") })
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(moveFrame.utf8)) as? [String: Any])
         let params = try XCTUnwrap(json["params"] as? [String: Any])
-        XCTAssertEqual(params["session_id"] as? String, "abc123")
-        XCTAssertEqual(params["project_id"] as? String, "proj123")
+        XCTAssertEqual(params["session_key"] as? String, "abc123")
+        XCTAssertEqual(params["cwd"] as? String, "/srv/client")
+        XCTAssertNil(params["project_id"])
+        XCTAssertNil(params["session_id"])
     }
 
-    func testMoveSessionToNoProjectOmitsProjectID() async throws {
+    func testMoveSessionToNoProjectIsRejectedBeforeNetworkRequest() async throws {
         let frames = LockedStringList()
         let client = makeGatewayClient(
             handler: { request in
-                switch request.url?.path {
-                case "/api/auth/ws-ticket":
-                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
-                case "/api/sessions/abc123":
-                    return apiTestJSONResponse("""
-                    {
-                      "session_id": "abc123"
-                    }
-                    """, for: request)
-                default:
-                    throw URLError(.badURL)
-                }
+                XCTFail("Unassign must not issue a request: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
             },
             frames: frames,
-            responses: [
-                "session.workspace.move": #"{"ok":true}"#
-            ]
+            responses: [:]
         )
 
-        let response = try await client.moveSession(id: "abc123", projectID: nil)
-
-        XCTAssertEqual(response.ok, true)
-        XCTAssertNil(response.session?.projectId)
-
-        // Moving to no project sends an explicit JSON `null` project_id on the
-        // RPC wire (not a stale project identifier).
-        let frame = try XCTUnwrap(frames.all.first)
-        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any])
-        XCTAssertEqual(json["method"] as? String, "session.workspace.move")
-        let params = try XCTUnwrap(json["params"] as? [String: Any])
-        XCTAssertEqual(params["session_id"] as? String, "abc123")
-        XCTAssertTrue(params["project_id"] is NSNull, "expected project_id to be JSON null, got: \(String(describing: params["project_id"]))")
+        do {
+            _ = try await client.moveSession(id: "abc123", projectID: nil)
+            XCTFail("Expected unsupported unassigned move")
+        } catch {
+            XCTAssertTrue(frames.all.isEmpty)
+        }
     }
 
-    func testSessionMutatorMove503WithServerPayloadMapsToStreamingBusyError() async throws {
-        // The gateway move RPC succeeds, then the detail re-read returns a 503
-        // carrying the server's JSON error payload; `SessionMutator.move` maps
-        // that to the streaming-busy error.
+    func testSessionMutatorMoveBusyRPCMapsToStreamingBusyError() async throws {
         let frames = LockedStringList()
         let client = makeGatewayClient(
             handler: { request in
-                switch request.url?.path {
-                case "/api/auth/ws-ticket":
-                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
-                case "/api/sessions/abc123":
-                    let response = HTTPURLResponse(
-                        url: request.url!,
-                        statusCode: 503,
-                        httpVersion: nil,
-                        headerFields: ["Content-Type": "application/json"]
-                    )!
-                    return (response, Data(#"{"error": "Session is busy (streaming). Please try again in a moment."}"#.utf8))
-                default:
-                    throw URLError(.badURL)
-                }
+                guard request.url?.path == "/api/auth/ws-ticket" else { throw URLError(.badURL) }
+                return apiTestJSONResponse(#"{"ticket":"t"}"#, for: request)
             },
             frames: frames,
             responses: [
-                "session.workspace.move": #"{"ok":true}"#
-            ]
+                "projects.tree": #"{"projects":[{"id":"proj123","primary_path":"/srv/client"}]}"#,
+                "projects.project_sessions": #"{"project":{"id":"proj123","repos":[]}}"#
+            ],
+            rpcErrors: ["session.workspace.move": (code: 4009, message: "session busy")]
         )
 
         do {
@@ -290,68 +251,27 @@ final class APIClientSessionMutationTests: APIClientTestCase {
         }
     }
 
-    func testSessionMutatorMoveProxy503WithoutJSONPayloadKeepsGenericAPIError() async throws {
-        // A tunnel/proxy 503 on the detail re-read serves HTML, not the server's
-        // JSON payload; keep the generic connectivity message for that case
-        // (issue #25).
+    func testSessionMutatorMoveNonBusyRPCKeepsGatewayError() async throws {
         let frames = LockedStringList()
         let client = makeGatewayClient(
             handler: { request in
-                switch request.url?.path {
-                case "/api/auth/ws-ticket":
-                    return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
-                case "/api/sessions/abc123":
-                    let response = HTTPURLResponse(
-                        url: request.url!,
-                        statusCode: 503,
-                        httpVersion: nil,
-                        headerFields: ["Content-Type": "text/html"]
-                    )!
-                    return (response, Data("<html>Service Unavailable</html>".utf8))
-                default:
-                    throw URLError(.badURL)
-                }
+                guard request.url?.path == "/api/auth/ws-ticket" else { throw URLError(.badURL) }
+                return apiTestJSONResponse(#"{"ticket":"t"}"#, for: request)
             },
             frames: frames,
             responses: [
-                "session.workspace.move": #"{"ok":true}"#
-            ]
+                "projects.tree": #"{"projects":[{"id":"proj123","primary_path":"/srv/client"}]}"#,
+                "projects.project_sessions": #"{"project":{"id":"proj123","repos":[]}}"#
+            ],
+            rpcErrors: ["session.workspace.move": (code: 5007, message: "move failed")]
         )
 
         do {
-            try await SessionMutator(client: client).move(sessionID: "abc123", to: nil)
-            XCTFail("Expected APIError.http(503)")
-        } catch let error as APIError {
-            guard case .http(let statusCode, _) = error else {
-                return XCTFail("Expected APIError.http, got \(error)")
-            }
-            XCTAssertEqual(statusCode, 503)
+            try await SessionMutator(client: client).move(sessionID: "abc123", to: "proj123")
+            XCTFail("Expected GatewayRpcError")
+        } catch let error as GatewayRpcError {
+            XCTAssertEqual(error.code, 5007)
         }
-    }
-
-    func testArchiveSessionBuildsExpectedBodyAndDecodesResponse() async throws {
-        // Archive is a native PATCH `/api/sessions/{id}` with `{archived: true}`.
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/sessions/abc123")
-            XCTAssertEqual(request.httpMethod, "PATCH")
-
-            let body = try XCTUnwrap(apiTestBodyData(from: request))
-            let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
-            XCTAssertEqual(json?["archived"] as? Bool, true)
-            XCTAssertNil(json?["session_id"])
-
-            return apiTestJSONResponse("""
-            {
-              "session_id": "abc123",
-              "archived": true
-            }
-            """, for: request)
-        }
-
-        let response = try await client.archiveSession(id: "abc123", archived: true)
-
-        XCTAssertEqual(response.ok, true)
-        XCTAssertEqual(response.session?.archived, true)
     }
 
     func testUnarchiveSessionBuildsExpectedBodyAndDecodesResponse() async throws {
@@ -391,6 +311,7 @@ final class APIClientSessionMutationTests: APIClientTestCase {
         handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data),
         frames: LockedStringList,
         responses: [String: String],
+        rpcErrors: [String: (code: Int, message: String)] = [:],
         lastResult: String = #"{}"#
     ) -> APIClient {
         MockURLProtocol.requestHandler = handler
@@ -415,8 +336,14 @@ final class APIClientSessionMutationTests: APIClientTestCase {
                     guard let json = try? JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any],
                           let id = json["id"] as? Int,
                           let method = json["method"] as? String else { return }
-                    let result = responses[method] ?? lastResult
-                    gateway.testDeliverFrame(#"{"jsonrpc":"2.0","id":\#(id),"result":\#(result)}"#)
+                    if let rpcError = rpcErrors[method] {
+                        gateway.testDeliverFrame(
+                            #"{"jsonrpc":"2.0","id":\#(id),"error":{"code":\#(rpcError.code),"message":"\#(rpcError.message)"}}"#
+                        )
+                    } else {
+                        let result = responses[method] ?? lastResult
+                        gateway.testDeliverFrame(#"{"jsonrpc":"2.0","id":\#(id),"result":\#(result)}"#)
+                    }
                 }
                 return gateway
             }

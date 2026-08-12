@@ -17,7 +17,8 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
             },
             frames: frames,
             responses: [
-                "projects.tree": ##"{"projects":[{"id":"proj123","label":"Client Work","color":"#336699","created_at":1770000000}]}"##
+                "projects.tree": ##"{"projects":[{"id":"proj123","label":"Client Work","color":"#336699","created_at":1770000000}]}"##,
+                "projects.project_sessions": ##"{"project":{"id":"proj123","repos":[]}}"##
             ]
         )
 
@@ -54,7 +55,8 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
                     {"id": 123, "label": true, "color": 456, "created_at": "1770000000"}
                   ]
                 }
-                """
+                """,
+                "projects.project_sessions": ##"{"project":{"id":"proj123","repos":[]}}"##
             ]
         )
 
@@ -90,7 +92,7 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
             ]
         )
 
-        let response = try await client.createProject(name: "Client Work", color: "#7cb9ff")
+        let response = try await client.createProject(name: "Client Work", color: "#7cb9ff", workspace: "/tmp/client-work")
         let project = try XCTUnwrap(response.project)
 
         XCTAssertEqual(response.ok, true)
@@ -105,8 +107,8 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
         XCTAssertEqual(json["method"] as? String, "projects.create")
         let params = try XCTUnwrap(json["params"] as? [String: Any])
         XCTAssertEqual(params["name"] as? String, "Client Work")
-        XCTAssertEqual(params["folders"] as? [String], [])
-        XCTAssertEqual(params["primary_path"] as? String, "")
+        XCTAssertEqual(params["folders"] as? [String], ["/tmp/client-work"])
+        XCTAssertEqual(params["primary_path"] as? String, "/tmp/client-work")
         XCTAssertEqual(params["use"] as? Bool, true)
         XCTAssertNil(params["color"])
     }

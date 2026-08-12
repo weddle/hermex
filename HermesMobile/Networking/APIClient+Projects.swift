@@ -10,16 +10,27 @@ extension APIClient {
             let result = try await client.projects()
             let projectsArray = result.objectValue?["projects"]?.arrayValue ?? []
             let projects = projectsArray.compactMap { Self.projectSummary(fromTree: $0) }
-            return ProjectsResponse(projects: projects)
+            var memberships: [String: String] = [:]
+
+            for projectValue in projectsArray {
+                guard let projectID = projectValue.objectValue?["id"]?.stringValue,
+                      !projectID.isEmpty else { continue }
+                let hydrated = try await client.projectSessions(projectID)
+                guard let project = hydrated.objectValue?["project"] else { continue }
+                for sessionID in Self.sessionIDs(inProjectTree: project) {
+                    memberships[sessionID] = projectID
+                }
+            }
+            return ProjectsResponse(projects: projects, sessionMemberships: memberships)
         }
     }
 
     /// Creates a project via the `projects.create` gateway RPC. The native
     /// payload carries `folders` (the workspace paths the project owns), so
     /// rename/create keep the path-based folder contract native expects.
-    func createProject(name: String, color: String?, profile: String? = nil) async throws -> ProjectMutationResponse {
+    func createProject(name: String, color: String?, workspace: String, profile: String? = nil) async throws -> ProjectMutationResponse {
         try await withGatewayConnection(profile: profile) { client in
-            let result = try await client.createProject(name: name, folders: [])
+            let result = try await client.createProject(name: name, folders: [workspace])
             let project = Self.projectSummary(from: result.objectValue?["project"])
             return ProjectMutationResponse(ok: project != nil, project: project, error: nil)
         }
@@ -67,7 +78,8 @@ extension APIClient {
             projectId: id,
             name: name,
             color: color,
-            createdAt: createdAt
+            createdAt: createdAt,
+            primaryPath: object["primary_path"]?.stringValue ?? object["path"]?.stringValue
         )
     }
 
@@ -79,7 +91,25 @@ extension APIClient {
             projectId: object["id"]?.stringValue,
             name: object["name"]?.stringValue ?? object["label"]?.stringValue,
             color: object["color"]?.stringValue,
-            createdAt: object["created_at"]?.doubleValue ?? object["createdAt"]?.doubleValue
+            createdAt: object["created_at"]?.doubleValue ?? object["createdAt"]?.doubleValue,
+            primaryPath: object["primary_path"]?.stringValue
         )
+    }
+
+    private static func sessionIDs(inProjectTree value: GatewayValue) -> Set<String> {
+        var ids: Set<String> = []
+        func visit(_ value: GatewayValue) {
+            if let object = value.objectValue {
+                if let id = object["id"]?.stringValue ?? object["session_id"]?.stringValue,
+                   object["title"] != nil || object["message_count"] != nil || object["cwd"] != nil {
+                    ids.insert(id)
+                }
+                for child in object.values { visit(child) }
+            } else if let array = value.arrayValue {
+                for child in array { visit(child) }
+            }
+        }
+        visit(value)
+        return ids
     }
 }

@@ -59,6 +59,25 @@ final class ChatStreamCoordinatorTests: APIClientTestCase {
     }
 
     @MainActor
+    func testBeginTurnUsesRuntimeSessionIDReturnedByResume() async throws {
+        let fabricator = ScriptedGatewayFabricator()
+        fabricator.onMake = { gateway, _ in
+            gateway.resumeResultFactory = { _ in .empty(sessionID: "runtime-123") }
+        }
+        let (coordinator, _, delegate, _) = makeCoordinator(fabricator: fabricator)
+
+        try await coordinator.beginTurn(sessionID: "stored-abc", prompt: "Hello")
+
+        let gateway = try XCTUnwrap(fabricator.latest)
+        XCTAssertEqual(gateway.resumeSessionIDs, ["stored-abc"])
+        XCTAssertEqual(gateway.submittedPrompts.map(\.sessionID), ["runtime-123"])
+        XCTAssertEqual(coordinator.activeStreamID, "runtime-123")
+
+        gateway.deliver(GatewayEventFixture.delta(sessionID: "runtime-123", text: "Works"))
+        XCTAssertEqual(delegate.tokens, ["Works"])
+    }
+
+    @MainActor
     func testBeginTurnRewindOrdinalReroutesToSubmitPrompt() async throws {
         let (coordinator, _, _, fabricator) = makeCoordinator()
 

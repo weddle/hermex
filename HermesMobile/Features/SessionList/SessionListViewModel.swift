@@ -220,7 +220,6 @@ final class SessionListViewModel {
             let visibleSessions = (response.sessions ?? [])
                 .filter { $0.archived != true && $0.shouldAppearInSessionList }
             applySessions(visibleSessions, archivedCount: response.archivedCount, animation: animation)
-            isViewingCachedData = false
 
             if let modelContext {
                 do {
@@ -677,10 +676,10 @@ final class SessionListViewModel {
         actionErrorMessage = nil
         lastError = nil
         defer { isLoadingProjects = false }
-
         do {
             let response = try await client.projects()
             projects = response.projects ?? []
+            sessions = sessions.map { $0.replacingProjectID(with: response.sessionMemberships[$0.sessionId ?? ""]) }
         } catch {
             guard !isCancellationError(error) else { return }
 
@@ -734,7 +733,11 @@ final class SessionListViewModel {
         }
 
         do {
-            let createResponse = try await client.createProject(name: name, color: color)
+            guard let workspace = Self.nonEmpty(session.workspace) ?? Self.nonEmpty(session.worktreePath) else {
+                actionErrorMessage = String(localized: "The session has no workspace for the new project.")
+                return false
+            }
+            let createResponse = try await client.createProject(name: name, color: color, workspace: workspace)
             guard let project = createResponse.project else {
                 actionErrorMessage = createResponse.error ?? String(localized: "The server did not return the new project.")
                 return false
@@ -781,7 +784,12 @@ final class SessionListViewModel {
         defer { isCreatingProject = false }
 
         do {
-            let createResponse = try await client.createProject(name: name, color: color)
+            let workspaces = try await client.workspaces()
+            guard let workspace = Self.nonEmpty(workspaces.last) ?? workspaces.workspaces?.compactMap(\.path).first else {
+                actionErrorMessage = String(localized: "Choose a workspace before creating a project.")
+                return false
+            }
+            let createResponse = try await client.createProject(name: name, color: color, workspace: workspace)
             guard let project = createResponse.project else {
                 actionErrorMessage = createResponse.error ?? String(localized: "The server did not return the new project.")
                 return false

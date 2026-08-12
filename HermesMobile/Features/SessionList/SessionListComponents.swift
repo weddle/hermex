@@ -843,12 +843,6 @@ struct SessionProjectMoveMenu: View {
     let actions: SessionListRowActions
 
     var body: some View {
-        Button {
-            actions.move(session, nil)
-        } label: {
-            Label("No project", systemImage: session.projectId == nil ? "checkmark" : "tray")
-        }
-        .disabled(isMovingSession || session.projectId == nil)
 
         if !projects.isEmpty {
             Divider()

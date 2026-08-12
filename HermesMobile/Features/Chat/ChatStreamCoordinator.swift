@@ -227,6 +227,7 @@ final class ChatStreamCoordinator {
             let resume = try await gateway.resumeSession(sessionID)
             guard epoch == connectionEpoch else { return }
 
+            activeStreamID = resume.sessionId
             applyResumePayload(resume)
         } catch {
             guard epoch == connectionEpoch else { return }
@@ -267,16 +268,32 @@ final class ChatStreamCoordinator {
         delegate?.streamCoordinatorStartAuxiliaryMonitoring()
 
         do {
-            let gateway = try await makeConnectedGateway()
-            let resume = try await gateway.resumeSession(sessionID)
-            guard epoch == connectionEpoch else { throw CancellationError() }
-            applyResumePayload(resume)
-            try await gateway.submitPrompt(sessionID: sessionID, text: prompt, rewindOrdinal: rewindOrdinal)
-            // If a stray idle `sessionInfo` event finalized the snapshot between
-            // resume and submit, re-open the turn so the incoming stream's
-            // deltas keep routing to the delegate.
+            var resolvedSessionID = sessionID
+            if let draft = GatewayDraftRegistry.shared.take(baseURL: client.baseURL, sessionID: sessionID) {
+                let gateway = draft.client
+                gateway.onEvent = { [weak self] event in
+                    self?.handleGatewayEvent(event, epoch: epoch)
+                }
+                gateway.onDisconnected = { [weak self] in
+                    Task { @MainActor in self?.handleGatewayDisconnect(epoch: epoch) }
+                }
+                gatewayClient = gateway
+                resolvedSessionID = draft.created.runtimeSessionID
+                activeStreamID = resolvedSessionID
+                try await gateway.submitPrompt(sessionID: resolvedSessionID, text: prompt, rewindOrdinal: rewindOrdinal)
+            } else {
+                let gateway = try await makeConnectedGateway()
+                let resume = try await gateway.resumeSession(sessionID)
+                guard epoch == connectionEpoch else { throw CancellationError() }
+                resolvedSessionID = resume.sessionId
+                activeStreamID = resolvedSessionID
+                applyResumePayload(resume)
+                try await gateway.submitPrompt(sessionID: resolvedSessionID, text: prompt, rewindOrdinal: rewindOrdinal)
+            }
+            // If a stray idle event finalized state between resume/create and
+            // submit, re-open the turn for the incoming runtime-id events.
             if activeStreamID == nil {
-                activeStreamID = sessionID
+                activeStreamID = resolvedSessionID
                 hasCompletedCurrentResponse = false
                 isConnectionSuspended = false
                 liveTokensPerSecond = nil

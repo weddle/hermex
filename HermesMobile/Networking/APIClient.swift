@@ -148,6 +148,38 @@ actor APIClient {
         }.value
     }
 
+    /// Creates a native draft and keeps its gateway socket alive until the
+    /// first prompt. `session.create` drafts are not persisted and cannot be
+    /// resumed after disconnect.
+    func createGatewayDraft(
+        workspace: String?,
+        model: String?,
+        modelProvider: String?,
+        profile: String?
+    ) async throws -> GatewayCreatedSession {
+        let ticket = try await mintWebSocketTicket(profile: profile)
+        let headers = customHeaderProvider()
+        let baseURL = baseURL
+        let gateway = await gatewayFabricator(baseURL, ticket, profile, headers)
+        do {
+            try await gateway.connect()
+            let created = try await gateway.createSession(
+                model: model,
+                provider: modelProvider,
+                fast: false,
+                cwd: workspace
+            )
+            await GatewayDraftRegistry.shared.store(
+                .init(client: gateway, created: created),
+                baseURL: baseURL
+            )
+            return created
+        } catch {
+            await gateway.disconnect()
+            throw error
+        }
+    }
+
     func send<Response: Decodable>(
         endpoint: Endpoint,
         method: String

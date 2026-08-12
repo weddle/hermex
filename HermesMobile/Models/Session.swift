@@ -59,18 +59,21 @@ struct SessionMutationResponse: Decodable {
 
 struct ProjectsResponse: Decodable, Equatable {
     let projects: [ProjectSummary]?
+    let sessionMemberships: [String: String]
 
     enum CodingKeys: String, CodingKey {
         case projects
     }
 
-    init(projects: [ProjectSummary]?) {
+    init(projects: [ProjectSummary]?, sessionMemberships: [String: String] = [:]) {
         self.projects = projects
+        self.sessionMemberships = sessionMemberships
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         projects = try? container.decodeIfPresent([ProjectSummary].self, forKey: .projects)
+        sessionMemberships = [:]
     }
 }
 
@@ -106,17 +109,20 @@ struct ProjectSummary: Decodable, Equatable, Hashable, Identifiable {
     let name: String?
     let color: String?
     let createdAt: Double?
+    let primaryPath: String?
 
     init(
         projectId: String?,
         name: String?,
         color: String?,
-        createdAt: Double?
+        createdAt: Double?,
+        primaryPath: String? = nil
     ) {
         self.projectId = projectId
         self.name = name
         self.color = color
         self.createdAt = createdAt
+        self.primaryPath = primaryPath
     }
 
     enum CodingKeys: String, CodingKey {
@@ -124,6 +130,7 @@ struct ProjectSummary: Decodable, Equatable, Hashable, Identifiable {
         case name
         case color
         case createdAt
+        case primaryPath
     }
 
     init(from decoder: Decoder) throws {
@@ -132,6 +139,7 @@ struct ProjectSummary: Decodable, Equatable, Hashable, Identifiable {
         name = container.decodeLossyStringIfPresent(forKey: .name)
         color = container.decodeLossyStringIfPresent(forKey: .color)
         createdAt = container.decodeLossyDoubleIfPresent(forKey: .createdAt)
+        primaryPath = container.decodeLossyStringIfPresent(forKey: .primaryPath)
     }
 }
 
@@ -382,6 +390,45 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
             pinned: pinned,
             archived: archived,
             projectId: projectId,
+            profile: profile,
+            inputTokens: inputTokens,
+            outputTokens: outputTokens,
+            estimatedCost: estimatedCost,
+            activeStreamId: activeStreamId,
+            isStreaming: isStreaming,
+            isCliSession: isCliSession,
+            userMessageCount: userMessageCount,
+            hasPendingUserMessage: hasPendingUserMessage,
+            pendingStartedAt: pendingStartedAt,
+            worktreePath: worktreePath,
+            sourceTag: sourceTag,
+            rawSource: rawSource,
+            sessionSource: sessionSource,
+            sourceLabel: sourceLabel,
+            parentSessionId: parentSessionId,
+            relationshipType: relationshipType,
+            readOnly: readOnly,
+            isReadOnly: isReadOnly,
+            matchType: matchType
+        )
+    }
+}
+
+extension SessionSummary {
+    func replacingProjectID(with projectID: String?) -> SessionSummary {
+        SessionSummary(
+            sessionId: sessionId,
+            title: title,
+            workspace: workspace,
+            model: model,
+            modelProvider: modelProvider,
+            messageCount: messageCount,
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+            lastMessageAt: lastMessageAt,
+            pinned: pinned,
+            archived: archived,
+            projectId: projectID,
             profile: profile,
             inputTokens: inputTokens,
             outputTokens: outputTokens,

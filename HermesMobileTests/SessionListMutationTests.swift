@@ -320,16 +320,8 @@ final class SessionListMutationTests: XCTestCase {
                 case "/api/auth/ws-ticket":
                     return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
                 case "/api/sessions/new-123":
-                    return apiTestJSONResponse("""
-                    {
-                      "session_id": "new-123",
-                      "title": "Untitled Session",
-                      "cwd": "/tmp/workspace",
-                      "updated_at": 1770000000,
-                      "last_activity_at": 1770000000,
-                      "archived": false
-                    }
-                    """, for: request)
+                    XCTFail("A native draft must not be read through REST before its first prompt.")
+                    throw URLError(.badURL)
                 case "/api/sessions":
                     XCTFail("New-chat creation should not block on a full session-list reload.")
                     throw URLError(.badURL)
@@ -340,7 +332,7 @@ final class SessionListMutationTests: XCTestCase {
             },
             frames: frames,
             responses: [
-                "session.create": #"{"session_id":"new-123"}"#
+                "session.create": #"{"session_id":"runtime-new","stored_session_id":"new-123","info":{"cwd":"/tmp/workspace"}}"#
             ]
         )
 
@@ -353,7 +345,7 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertEqual(try CacheStore.cachedSessions(serverURL: serverURL, in: context).map(\.sessionId), ["new-123"])
         XCTAssertEqual(
             requestedPaths,
-            ["/api/fs/default-cwd", "/api/auth/ws-ticket", "/api/sessions/new-123"]
+            ["/api/fs/default-cwd", "/api/auth/ws-ticket"]
         )
         XCTAssertFalse(viewModel.isCreatingSession)
         XCTAssertNil(viewModel.actionErrorMessage)
@@ -386,15 +378,8 @@ final class SessionListMutationTests: XCTestCase {
                 case "/api/auth/ws-ticket":
                     return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
                 case "/api/sessions/worktree-new":
-                    return apiTestJSONResponse("""
-                    {
-                      "session_id": "worktree-new",
-                      "title": "Untitled Session",
-                      "cwd": "/tmp/workspace",
-                      "worktree_path": "/tmp/hermes-worktree",
-                      "archived": false
-                    }
-                    """, for: request)
+                    XCTFail("A native draft must not be read through REST before its first prompt.")
+                    throw URLError(.badURL)
                 default:
                     XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                     throw URLError(.badURL)
@@ -402,7 +387,7 @@ final class SessionListMutationTests: XCTestCase {
             },
             frames: frames,
             responses: [
-                "session.create": #"{"session_id":"worktree-new"}"#
+                "session.create": #"{"session_id":"runtime-worktree","stored_session_id":"worktree-new","info":{"cwd":"/tmp/workspace"}}"#
             ]
         )
 
