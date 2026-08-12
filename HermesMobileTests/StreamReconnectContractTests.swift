@@ -1,469 +1,404 @@
+import SwiftData
 import XCTest
 @testable import HermesMobile
 
-/// Contract tests for the riskiest streaming paths: disconnect → reconnect
-/// with replayed tokens, server restart mid-stream, and replay of content the
-/// client already rendered. Each test drives a real `ChatViewModel` (which
-/// owns the replay dedup from PR #211) and a real `ChatStreamCoordinator`
-/// through a full scripted wire sequence via `ScriptedSSEStreamingClient`.
+/// Contract tests for the riskiest gateway reconnect paths. The SSE-era
+/// replay/`after_seq` journal has no gateway equivalent: `session.resume`
+/// returns the durable transcript plus any in-flight projection. So the
+/// reconnect contract here is expressed in gateway terms —
+///
+///   1. a disconnect/suspend reconnect mints a NEW single-use ticket and NEW
+///      client (fresh connection epoch);
+///   2. events delivered on a superseded (pre-reconnect) client are rejected as
+///      stale-epoch;
+///   3. a resumed live turn applies `inflightAssistantText` as a visible-stream
+///      prefix exactly once — session-info echoes never re-apply it.
+///
+/// Each test drives a real `ChatStreamCoordinator` through the shared
+/// `ScriptedGatewayFabricator`/`ScriptedGatewayClient`/`GatewayEventFixture`
+/// doubles and a faithful delegate spy (which mimics the view model dropping
+/// the streaming anchor when it reloads the transcript on reconnect).
 final class StreamReconnectContractTests: APIClientTestCase {
-    // MARK: - Scenario 1: reconnect with overlapping replayed tokens (#201 regression guard)
+    // MARK: - Fresh-ticket reconnect
 
     @MainActor
-    func testReconnectWithOverlappingReplayRendersEachTokenExactlyOnce() async throws {
-        let streamClient = ScriptedSSEStreamingClient(connectionScripts: [
-            [
-                .init(.token("Alpha "), lastEventID: "stream-123:1"),
-                .init(.token("bravo "), lastEventID: "stream-123:2"),
-                .init(.transportError("The network connection was lost."))
-            ],
-            [
-                .init(.token("Alpha "), lastEventID: "stream-123:1"),
-                .init(.token("bravo "), lastEventID: "stream-123:2"),
-                .init(.token("charlie "), lastEventID: "stream-123:3"),
-                .init(.token("delta."), lastEventID: "stream-123:4"),
-                .init(.done(DoneStreamEvent())),
-                .init(.streamEnd)
-            ]
-        ])
-        let viewModel = try makeViewModel(streamClient: streamClient) { request in
-            switch request.url?.path {
-            case "/api/chat/start":
-                return apiTestJSONResponse(
-                    #"{"session_id": "session-abc", "stream_id": "stream-123"}"#,
-                    for: request
-                )
-            case "/api/chat/stream/status":
-                return apiTestJSONResponse(
-                    #"{"active": false, "stream_id": "stream-123", "replay_available": true}"#,
-                    for: request
-                )
-            case "/api/session":
-                return apiTestJSONResponse(
-                    #"{"session": {"session_id": "session-abc", "title": "Planning"}}"#,
-                    for: request
-                )
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
+    func testDisconnectReconnectMintsFreshTicketAndFreshClient() async throws {
+        let fabricator = ScriptedGatewayFabricator()
+        let delegate = ReconnectDelegateSpy()
+        let issuer = TicketIssuer()
+        let coordinator = makeCoordinator(
+            fabricator: fabricator,
+            delegate: delegate,
+            handler: ticketHandler(issuer: issuer)
+        )
 
-        let didStart = await viewModel.sendMessage("Keep working")
-        XCTAssertTrue(didStart)
-        streamClient.playArmedConnectionScript()
+        await coordinator.start(streamID: "session-abc")
 
-        XCTAssertEqual(assistantContents(of: viewModel), ["Alpha bravo "])
-        XCTAssertTrue(viewModel.isActiveStreamConnectionSuspended)
+        XCTAssertEqual(fabricator.makeCount, 1)
+        XCTAssertEqual(fabricator.tickets.count, 1)
+        let firstClient = try XCTUnwrap(fabricator.instances.first)
+        XCTAssertEqual(firstClient.connectCount, 1)
+        XCTAssertEqual(firstClient.resumeSessionIDs, ["session-abc"])
+        XCTAssertEqual(coordinator.activeStreamID, "session-abc")
+        XCTAssertFalse(coordinator.isConnectionSuspended)
 
-        // The transport error schedules an async reconnect; the status probe
-        // reports the stream inactive with a replay journal available.
-        try await waitUntil { streamClient.startedURLs.count == 2 }
+        // Disconnect tears down the current transport, then reconnect must open a
+        // brand-new epoch: fresh single-use ticket + fresh client.
+        coordinator.suspendActiveStreamConnection()
+        XCTAssertEqual(firstClient.disconnectCount, 1)
 
-        let replayURL = try XCTUnwrap(streamClient.startedURLs.last)
-        let query = queryDictionary(of: replayURL)
-        XCTAssertEqual(replayURL.path, "/api/chat/stream")
-        XCTAssertEqual(query["stream_id"], "stream-123")
-        XCTAssertEqual(query["replay"], "1")
-        XCTAssertEqual(query["after_seq"], "2")
+        await coordinator.reconnectIfNeeded()
 
-        streamClient.playArmedConnectionScript()
-
-        XCTAssertEqual(assistantContents(of: viewModel), ["Alpha bravo charlie delta."])
-        XCTAssertNil(viewModel.activeStreamID)
-        XCTAssertEqual(viewModel.activeStreamRecoveryState, .idle)
-        XCTAssertFalse(viewModel.isActiveStreamConnectionSuspended)
-        XCTAssertNil(viewModel.sendErrorMessage)
-        XCTAssertEqual(streamClient.droppedEventCount, 0)
+        XCTAssertEqual(fabricator.makeCount, 2)
+        XCTAssertEqual(fabricator.tickets.count, 2)
+        XCTAssertNotEqual(
+            try XCTUnwrap(fabricator.tickets.first),
+            try XCTUnwrap(fabricator.tickets.last),
+            "Reconnect must mint a fresh single-use ticket, not reuse the consumed one"
+        )
+        XCTAssertEqual(fabricator.baseURLs.count, 2)
+        let secondClient = try XCTUnwrap(fabricator.instances.last)
+        XCTAssertNotIdentical(firstClient, secondClient)
+        XCTAssertEqual(secondClient.connectCount, 1)
+        XCTAssertEqual(secondClient.resumeSessionIDs, ["session-abc"])
+        XCTAssertEqual(coordinator.activeStreamID, "session-abc")
+        XCTAssertFalse(coordinator.isConnectionSuspended)
     }
 
-    // MARK: - Scenario 2: server restart mid-stream (no replay journal)
+    // MARK: - Stale-epoch rejection
 
     @MainActor
-    func testServerRestartMidStreamRecoversToConsistentCompletedState() async throws {
-        let streamClient = ScriptedSSEStreamingClient(connectionScripts: [
-            [
-                .init(.token("Alpha "), lastEventID: "stream-123:1"),
-                .init(.token("bravo "), lastEventID: "stream-123:2"),
-                .init(.transportError("The network connection was lost."))
-            ]
-        ])
-        let viewModel = try makeViewModel(streamClient: streamClient) { request in
-            switch request.url?.path {
-            case "/api/chat/start":
-                return apiTestJSONResponse(
-                    #"{"session_id": "session-abc", "stream_id": "stream-123"}"#,
-                    for: request
-                )
-            case "/api/chat/stream/status":
-                // A restarted server has neither the live stream nor its replay journal.
-                return apiTestJSONResponse(
-                    #"{"active": false, "stream_id": "stream-123", "replay_available": false}"#,
-                    for: request
-                )
-            case "/api/session":
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "title": "Planning",
-                    "messages": [
-                      {
-                        "role": "user",
-                        "content": "Keep working",
-                        "timestamp": 1770000100,
-                        "message_id": "user-1"
-                      },
-                      {
-                        "role": "assistant",
-                        "content": "Alpha bravo charlie delta.",
-                        "timestamp": 1770000101,
-                        "message_id": "assistant-1"
-                      }
-                    ]
-                  }
+    func testEventFromPreReconnectClientIsIgnoredAfterReconnect() async throws {
+        let fabricator = ScriptedGatewayFabricator()
+        let delegate = ReconnectDelegateSpy()
+        let coordinator = makeCoordinator(
+            fabricator: fabricator,
+            delegate: delegate,
+            handler: ticketHandler(issuer: TicketIssuer())
+        )
+
+        await coordinator.start(streamID: "session-abc")
+        let firstClient = try XCTUnwrap(fabricator.instances.first)
+        firstClient.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "Hello "))
+        XCTAssertEqual(delegate.appendTokens, ["Hello "])
+
+        coordinator.suspendActiveStreamConnection()
+        await coordinator.reconnectIfNeeded()
+
+        let secondClient = try XCTUnwrap(fabricator.instances.last)
+        XCTAssertEqual(fabricator.makeCount, 2)
+        XCTAssertEqual(secondClient.connectCount, 1)
+
+        // A late event on the discarded epoch — delta or terminal — must be
+        // dropped entirely: no token append, no premature stream finalize.
+        firstClient.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "STALE"))
+        firstClient.deliver(GatewayEventFixture.complete(sessionID: "session-abc", content: "STALE-COMPLETE"))
+        XCTAssertEqual(delegate.appendTokens, ["Hello "])
+        XCTAssertEqual(coordinator.activeStreamID, "session-abc")
+        XCTAssertNil(delegate.completedRefreshValues.last)
+
+        // The fresh epoch still routes events normally.
+        secondClient.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "World"))
+        XCTAssertEqual(delegate.appendTokens, ["Hello ", "World"])
+    }
+
+    // MARK: - In-flight prefix applied exactly once
+
+    @MainActor
+    func testReconnectAppliesInflightAssistantPrefixExactlyOnce() async throws {
+        let fabricator = ScriptedGatewayFabricator()
+        // Only the reconnect-time client (second made) resumes a live turn with
+        // an in-flight assistant projection.
+        fabricator.onMake = { instance, index in
+            if index == 2 {
+                instance.resumeResultFactory = { sessionID in
+                    .withInflight(sessionID: sessionID, inflightText: "Partial answer")
                 }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
             }
         }
-
-        let didStart = await viewModel.sendMessage("Keep working")
-        XCTAssertTrue(didStart)
-        streamClient.playArmedConnectionScript()
-
-        XCTAssertEqual(assistantContents(of: viewModel), ["Alpha bravo "])
-        XCTAssertTrue(viewModel.isActiveStreamConnectionSuspended)
-
-        // The async reconnect probe finds the stream gone, refreshes the
-        // transcript, and completes the response from the server copy.
-        try await waitUntil { viewModel.activeStreamID == nil }
-
-        XCTAssertEqual(streamClient.startedURLs.count, 1)
-        XCTAssertEqual(
-            viewModel.messages.compactMap(\.content),
-            ["Keep working", "Alpha bravo charlie delta."]
+        let delegate = ReconnectDelegateSpy()
+        let coordinator = makeCoordinator(
+            fabricator: fabricator,
+            delegate: delegate,
+            handler: ticketHandler(issuer: TicketIssuer())
         )
-        XCTAssertEqual(assistantContents(of: viewModel), ["Alpha bravo charlie delta."])
-        XCTAssertEqual(viewModel.activeStreamRecoveryState, .idle)
-        XCTAssertFalse(viewModel.isActiveStreamConnectionSuspended)
-        XCTAssertNil(viewModel.streamingAssistantMessageID)
-        XCTAssertNil(viewModel.sendErrorMessage)
-        XCTAssertEqual(streamClient.droppedEventCount, 0)
+
+        // First epoch (no live projection): stream some deltas.
+        await coordinator.start(streamID: "session-abc")
+        let firstClient = try XCTUnwrap(fabricator.instances.first)
+        firstClient.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: "Alpha"))
+        XCTAssertEqual(delegate.appendTokens, ["Alpha"])
+
+        // Disconnect + reconnect: the transcript reload drops the streaming
+        // anchor, so the resume projection attaches as the prefix.
+        coordinator.suspendActiveStreamConnection()
+        await coordinator.reconnectIfNeeded()
+
+        XCTAssertEqual(fabricator.makeCount, 2)
+        let secondClient = try XCTUnwrap(fabricator.instances.last)
+        XCTAssertEqual(secondClient.resumeSessionIDs, ["session-abc"])
+        XCTAssertEqual(
+            delegate.appendTokens,
+            ["Alpha", "Partial answer"],
+            "The resumed turn's in-flight projection must attach as the streaming prefix"
+        )
+
+        // New deltas append after the prefix — the prefix is NOT re-sent.
+        secondClient.deliver(GatewayEventFixture.delta(sessionID: "session-abc", text: " continues"))
+        XCTAssertEqual(delegate.appendTokens, ["Alpha", "Partial answer", " continues"])
+
+        // A `sessionInfo` echo that carries the same in-flight projection must
+        // NOT re-apply the prefix (the once-guarantee is keyed to the visible
+        // streaming message, not to every snapshot echo).
+        secondClient.deliver(GatewayEventFixture.info(
+            sessionID: "session-abc",
+            running: true,
+            inflightText: "Partial answer"
+        ))
+        XCTAssertEqual(delegate.appendTokens, ["Alpha", "Partial answer", " continues"])
     }
 
-    // MARK: - Scenario 3: replay arriving after the response already rendered locally
+    // MARK: - Interrupt / cancel
 
     @MainActor
-    func testReplayAfterStreamAlreadyCompletedLocallyIsIgnoredCleanly() async throws {
-        let streamClient = ScriptedSSEStreamingClient(connectionScripts: [
-            [
-                .init(.token("Alpha "), lastEventID: "stream-123:1"),
-                .init(.token("bravo."), lastEventID: "stream-123:2")
-            ],
-            [
-                .init(.token("Alpha "), lastEventID: "stream-123:1"),
-                .init(.token("bravo."), lastEventID: "stream-123:2"),
-                .init(.done(DoneStreamEvent())),
-                .init(.streamEnd)
-            ]
-        ])
-        let viewModel = try makeViewModel(streamClient: streamClient) { request in
-            switch request.url?.path {
-            case "/api/chat/start":
-                return apiTestJSONResponse(
-                    #"{"session_id": "session-abc", "stream_id": "stream-123"}"#,
-                    for: request
-                )
-            case "/api/chat/stream/status":
-                return apiTestJSONResponse(
-                    #"{"active": false, "stream_id": "stream-123", "replay_available": true}"#,
-                    for: request
-                )
-            case "/api/session":
-                return apiTestJSONResponse(
-                    #"{"session": {"session_id": "session-abc", "title": "Planning"}}"#,
-                    for: request
-                )
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        let didStart = await viewModel.sendMessage("Keep working")
-        XCTAssertTrue(didStart)
-        streamClient.playArmedConnectionScript()
-
-        XCTAssertEqual(assistantContents(of: viewModel), ["Alpha bravo."])
-
-        // The app backgrounds after the full text rendered but before the
-        // completion events arrive; on foreground the replay re-sends the
-        // entire already-rendered response plus the completion.
-        viewModel.suspendStreamForBackground()
-        await viewModel.reconnectStreamIfNeeded()
-
-        XCTAssertEqual(streamClient.startedURLs.count, 2)
-        let replayURL = try XCTUnwrap(streamClient.startedURLs.last)
-        let query = queryDictionary(of: replayURL)
-        XCTAssertEqual(query["replay"], "1")
-        XCTAssertEqual(query["after_seq"], "2")
-
-        streamClient.playArmedConnectionScript()
-
-        XCTAssertEqual(assistantContents(of: viewModel), ["Alpha bravo."])
-        XCTAssertNil(viewModel.activeStreamID)
-        XCTAssertEqual(viewModel.activeStreamRecoveryState, .idle)
-        XCTAssertFalse(viewModel.isActiveStreamConnectionSuspended)
-        XCTAssertNil(viewModel.sendErrorMessage)
-        XCTAssertEqual(streamClient.droppedEventCount, 0)
-    }
-
-    @MainActor
-    func testDuplicateStartReconnectsExistingStreamWithoutKeepingOptimisticMessage() async throws {
-        let streamClient = ScriptedSSEStreamingClient(connectionScripts: [[
-            .init(.token(" continuation"), lastEventID: "stream-existing:1")
-        ]])
-        let viewModel = try makeViewModel(streamClient: streamClient) { request in
-            switch request.url?.path {
-            case "/api/chat/start":
-                return self.jsonResponse(
-                    #"{"error":"session already has an active stream","active_stream_id":"stream-existing"}"#,
-                    statusCode: 409,
-                    for: request
-                )
-            case "/api/session":
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "title": "Planning",
-                    "active_stream_id": "stream-existing",
-                    "messages": [
-                      {
-                        "role": "user",
-                        "content": "Already accepted",
-                        "timestamp": 1770000100,
-                        "message_id": "user-existing"
-                      },
-                      {
-                        "role": "assistant",
-                        "content": "Partial answer",
-                        "timestamp": 1770000101,
-                        "message_id": "assistant-existing"
-                      }
-                    ]
-                  }
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        let didStart = await viewModel.sendMessage("Duplicate request")
-
-        XCTAssertFalse(didStart)
-        XCTAssertEqual(viewModel.activeStreamID, "stream-existing")
-        XCTAssertEqual(
-            viewModel.messages.compactMap(\.content),
-            ["Already accepted", "Partial answer"]
+    func testCancelActiveStreamInterruptsCurrentEpochAndFinalizes() async throws {
+        let fabricator = ScriptedGatewayFabricator()
+        let delegate = ReconnectDelegateSpy()
+        let liveActivity = ReconnectSpyLiveActivityManager()
+        let coordinator = makeCoordinator(
+            fabricator: fabricator,
+            delegate: delegate,
+            liveActivityManager: liveActivity,
+            handler: ticketHandler(issuer: TicketIssuer())
         )
-        XCTAssertEqual(viewModel.streamingAssistantMessageID, "assistant-existing")
-        XCTAssertNil(viewModel.sendErrorMessage)
-        XCTAssertEqual(queryDictionary(of: try XCTUnwrap(streamClient.startedURLs.first))["stream_id"], "stream-existing")
 
-        streamClient.playArmedConnectionScript()
-        viewModel.flushPendingStreamingContent()
-        XCTAssertEqual(
-            assistantContents(of: viewModel),
-            ["Partial answer continuation"]
-        )
-    }
+        await coordinator.start(streamID: "session-abc")
+        let client = try XCTUnwrap(fabricator.instances.first)
+        XCTAssertEqual(client.connectCount, 1)
 
-    @MainActor
-    func testDuplicateStartReconnectDoesNotReusePreviousTurnAssistantAnchor() async throws {
-        let streamClient = ScriptedSSEStreamingClient(connectionScripts: [[
-            .init(.token("new response"), lastEventID: "stream-existing:1")
-        ]])
-        let viewModel = try makeViewModel(streamClient: streamClient) { request in
-            switch request.url?.path {
-            case "/api/chat/start":
-                return self.jsonResponse(
-                    #"{"error":"session already has an active stream","active_stream_id":"stream-existing"}"#,
-                    statusCode: 409,
-                    for: request
-                )
-            case "/api/session":
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "title": "Planning",
-                    "active_stream_id": "stream-existing",
-                    "messages": [
-                      {
-                        "role": "assistant",
-                        "content": "Previous response",
-                        "timestamp": 1770000099,
-                        "message_id": "assistant-previous"
-                      },
-                      {
-                        "role": "user",
-                        "content": "Already accepted",
-                        "timestamp": 1770000100,
-                        "message_id": "user-existing"
-                      }
-                    ]
-                  }
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
+        _ = try await coordinator.cancelActiveStream()
 
-        let didStart = await viewModel.sendMessage("Duplicate request")
-
-        XCTAssertFalse(didStart)
-        XCTAssertEqual(
-            viewModel.messages.compactMap(\.content),
-            ["Previous response", "Already accepted"]
-        )
-        XCTAssertNil(viewModel.streamingAssistantMessageID)
-
-        streamClient.playArmedConnectionScript()
-        viewModel.flushPendingStreamingContent()
-        XCTAssertEqual(
-            assistantContents(of: viewModel),
-            ["Previous response", "new response"]
-        )
-    }
-
-    func testOnlySpecificMissingStream404IsTerminal() {
-        XCTAssertTrue(
-            APIError.http(statusCode: 404, body: #"{"error":"stream not found"}"#).indicatesMissingStream
-        )
-        XCTAssertFalse(
-            APIError.http(statusCode: 404, body: #"{"error":"endpoint not found"}"#).indicatesMissingStream
-        )
-        XCTAssertFalse(APIError.http(statusCode: 404, body: nil).indicatesMissingStream)
-    }
-
-    @MainActor
-    func testMissingStatusAfterDisconnectFinalizesInsteadOfRetryingStaleStream() async throws {
-        let streamClient = ScriptedSSEStreamingClient(connectionScripts: [[
-            .init(.token("Partial"), lastEventID: "stream-123:1"),
-            .init(.transportError("Connection lost"))
-        ]])
-        let viewModel = try makeViewModel(streamClient: streamClient) { request in
-            switch request.url?.path {
-            case "/api/chat/start":
-                return apiTestJSONResponse(#"{"session_id":"session-abc","stream_id":"stream-123"}"#, for: request)
-            case "/api/chat/stream/status":
-                return self.jsonResponse(#"{"error":"stream not found"}"#, statusCode: 404, for: request)
-            case "/api/session":
-                return apiTestJSONResponse(#"{"session":{"session_id":"session-abc","title":"Planning","messages":[]}}"#, for: request)
-            default:
-                throw URLError(.badURL)
-            }
-        }
-
-        let didStart = await viewModel.sendMessage("Keep working")
-        XCTAssertTrue(didStart)
-        streamClient.playArmedConnectionScript()
-        try await waitUntil { viewModel.activeStreamID == nil }
-
-        XCTAssertEqual(streamClient.startedURLs.count, 1)
-        XCTAssertFalse(viewModel.isActiveStreamConnectionSuspended)
-        XCTAssertNil(viewModel.sendErrorMessage)
-    }
-
-    private func jsonResponse(
-        _ json: String,
-        statusCode: Int,
-        for request: URLRequest
-    ) -> (HTTPURLResponse, Data) {
-        (
-            HTTPURLResponse(
-                url: request.url!,
-                statusCode: statusCode,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "application/json"]
-            )!,
-            Data(json.utf8)
-        )
+        XCTAssertEqual(client.interruptedSessionIDs, ["session-abc"])
+        XCTAssertNil(coordinator.activeStreamID)
+        XCTAssertFalse(coordinator.isConnectionSuspended)
+        XCTAssertEqual(delegate.finishCount, 1)
+        XCTAssertEqual(liveActivity.ends.last?.status, .cancelled)
+        XCTAssertEqual(client.disconnectCount, 1)
     }
 
     // MARK: - Helpers
 
+    private func ticketHandler(
+        issuer: TicketIssuer
+    ) -> (URLRequest) throws -> (HTTPURLResponse, Data) {
+        { request in
+            let ticket = issuer.next()
+            return apiTestJSONResponse(
+                "{\"ticket\": \"\(ticket)\"}",
+                for: request
+            )
+        }
+    }
+
+    /// A reference-type ticket sequence so the URLProtocol handler can issue a
+    /// distinct single-use ticket per mint without mutating an actor-isolated
+    /// variable from a nonisolated callback.
+    private final class TicketIssuer {
+        private var serial = 0
+
+        func next() -> String {
+            serial += 1
+            return "gateway-ticket-\(serial)"
+        }
+    }
+
     @MainActor
-    private func makeViewModel(
-        streamClient: ScriptedSSEStreamingClient,
+    private func makeCoordinator(
+        fabricator: ScriptedGatewayFabricator,
+        delegate: ReconnectDelegateSpy,
+        liveActivityManager: ReconnectSpyLiveActivityManager? = nil,
         handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
-    ) throws -> ChatViewModel {
-        MockURLProtocol.requestHandler = handler
-
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [MockURLProtocol.self]
-        let urlSession = URLSession(configuration: configuration)
-        let server = try XCTUnwrap(URL(string: "https://example.test"))
-        let client = APIClient(baseURL: server, session: urlSession)
-
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        let session = try decoder.decode(
-            SessionSummary.self,
-            from: Data("""
-            {
-              "session_id": "session-abc",
-              "title": "Planning",
-              "workspace": "/tmp/workspace"
-            }
-            """.utf8)
+    ) -> ChatStreamCoordinator {
+        let resolvedLiveActivityManager = liveActivityManager ?? ReconnectSpyLiveActivityManager()
+        let coordinator = ChatStreamCoordinator(
+            client: makeClient(handler: handler),
+            liveActivityManager: resolvedLiveActivityManager,
+            showsLiveActivityResponseExcerpts: false,
+            gatewayFabricator: fabricator.fabricator
         )
+        coordinator.attach(delegate: delegate)
+        return coordinator
+    }
+}
 
-        let viewModel = ChatViewModel(
-            session: session,
-            server: server,
-            client: client,
-            streamClient: streamClient,
-            approvalStreamClient: ScriptedSSEStreamingClient(),
-            clarifyStreamClient: ScriptedSSEStreamingClient(),
-            btwStreamClient: ScriptedSSEStreamingClient()
-        )
-        streamClient.flushPendingStreamingContent = { [weak viewModel] in
-            viewModel?.flushPendingStreamingContent()
+@MainActor
+private final class ReconnectDelegateSpy: ChatStreamCoordinatorDelegate {
+    var streamCoordinatorSessionID: String? = "session-abc"
+    var streamCoordinatorDisplayTitle = "Planning"
+    var streamCoordinatorHasRunningLiveToolCall = false
+    var streamCoordinatorHasPendingPrompt = false
+    var latestServerLoadHadAssistantResponseAfterLatestUser = false
+    var streamCoordinatorLatestServerLoadHadAssistantResponseAfterLatestUser: Bool {
+        latestServerLoadHadAssistantResponseAfterLatestUser
+    }
+    var streamCoordinatorStreamingAssistantMessageID: String?
+
+    /// Recorded token appends (across all connection epochs).
+    private(set) var appendTokens: [String] = []
+    private(set) var loadMessagesCount = 0
+    private(set) var startMonitoringCount = 0
+    private(set) var stopMonitoringClearPromptValues: [Bool] = []
+    private(set) var saveSnapshotCount = 0
+    private(set) var removedSnapshotStreamIDs: [String?] = []
+    private(set) var finishCount = 0
+    private(set) var errorMessages: [String] = []
+    private(set) var recoveryErrorDescriptions: [String] = []
+    private(set) var startConnectionReplayValues: [Bool] = []
+    private(set) var resetRecoveryCount = 0
+    private(set) var completedRefreshValues: [Bool] = []
+    var onLoadMessages: (() async -> Void)?
+
+    func streamCoordinatorLoadMessages(modelContext: ModelContext?) async {
+        loadMessagesCount += 1
+        // Mimic the view model's reconnect load: the roaming streaming anchor is
+        // dropped so a live resume projection can attach as the prefix.
+        streamCoordinatorStreamingAssistantMessageID = nil
+        await onLoadMessages?()
+    }
+
+    func streamCoordinatorLatestAssistantMessageID() -> String? {
+        nil
+    }
+
+    func streamCoordinatorStartAuxiliaryMonitoring() {
+        startMonitoringCount += 1
+    }
+
+    func streamCoordinatorStopAuxiliaryMonitoring(clearPrompt: Bool) {
+        stopMonitoringClearPromptValues.append(clearPrompt)
+    }
+
+    func streamCoordinatorSaveSnapshotIfNeeded() {
+        saveSnapshotCount += 1
+    }
+
+    func streamCoordinatorRestoreSnapshotIfAvailable(streamID: String) -> String? {
+        nil
+    }
+
+    func streamCoordinatorRemoveSnapshot(streamID: String?) {
+        removedSnapshotStreamIDs.append(streamID)
+    }
+
+    func streamCoordinatorFlushPinnedLocalNoticesToTranscript() {
+        // No-op for this spy.
+    }
+
+    func streamCoordinatorDrainQueuedSlashMessageIfIdle() {
+        // No-op for this spy.
+    }
+
+    func streamCoordinatorRefreshCompletedResponseTitleIfNeeded() {
+        // No-op for this spy.
+    }
+
+    func streamCoordinatorDidCompleteCurrentResponse(needsTranscriptRefresh: Bool) {
+        completedRefreshValues.append(needsTranscriptRefresh)
+    }
+
+    func streamCoordinatorDidFinishStream() {
+        finishCount += 1
+    }
+
+    func streamCoordinatorDidReceiveErrorMessage(_ message: String) {
+        errorMessages.append(message)
+    }
+
+    func streamCoordinatorDidReceiveRecoveryError(_ error: Error) {
+        recoveryErrorDescriptions.append(error.localizedDescription)
+    }
+
+    func streamCoordinatorDidStartConnection(isReplay: Bool) {
+        startConnectionReplayValues.append(isReplay)
+    }
+
+    func streamCoordinatorDidResetRecoveryState() {
+        resetRecoveryCount += 1
+    }
+
+    func streamCoordinatorAppendToken(_ text: String) -> Bool {
+        appendTokens.append(text)
+        // Mimic `ensureStreamingAssistantMessage`: the first appended token in a
+        // turn creates the visible streaming assistant message.
+        if streamCoordinatorStreamingAssistantMessageID == nil {
+            streamCoordinatorStreamingAssistantMessageID = "stream-1"
         }
-        return viewModel
+        return true
     }
 
-    @MainActor
-    private func assistantContents(of viewModel: ChatViewModel) -> [String] {
-        viewModel.messages.filter { $0.role == "assistant" }.compactMap(\.content)
+    func streamCoordinatorAppendInterimAssistant(_ payload: InterimAssistantStreamEvent) -> Bool {
+        payload.text?.isEmpty == false
     }
 
-    private func queryDictionary(of url: URL) -> [String: String] {
-        let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        return Dictionary(uniqueKeysWithValues: queryItems.map { ($0.name, $0.value ?? "") })
+    func streamCoordinatorAppendReasoning(_ text: String) -> Bool {
+        !text.isEmpty
     }
 
-    @MainActor
-    private func waitUntil(
-        timeout: TimeInterval = 2,
-        _ condition: @MainActor () -> Bool
-    ) async throws {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() {
-                return
-            }
-            try await Task.sleep(nanoseconds: 10_000_000)
-        }
-        XCTFail("Timed out waiting for condition")
+    func streamCoordinatorAppendToolCall(_ payload: ToolStreamEvent) -> Bool {
+        true
+    }
+
+    func streamCoordinatorCompleteToolCall(_ payload: ToolStreamEvent) -> Bool {
+        true
+    }
+
+    func streamCoordinatorUpdateTitle(_ payload: TitleStreamEvent) -> Bool {
+        payload.title?.isEmpty == false
+    }
+
+    func streamCoordinatorApplyDone(_ payload: DoneStreamEvent) -> Bool {
+        false
+    }
+
+    func streamCoordinatorApplyApprovalUpdate(_ update: ApprovalPendingResponse) {
+        // No-op for this spy.
+    }
+
+    func streamCoordinatorApplyClarificationUpdate(_ update: ClarificationPendingResponse) {
+        // No-op for this spy.
+    }
+
+    func streamCoordinatorEnqueuePendingSteerLeftover(_ text: String) -> Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+@MainActor
+private final class ReconnectSpyLiveActivityManager: AgentLiveActivityManaging {
+    struct End: Equatable {
+        let status: AgentRunActivityStatus
+        let activity: String
+        let errorSummary: String?
+    }
+
+    private(set) var starts: [(sessionID: String, sessionTitle: String, streamID: String?)] = []
+    private(set) var updates: [AgentLiveActivityEvent] = []
+    private(set) var markStaleCount = 0
+    private(set) var ends: [End] = []
+
+    func start(sessionID: String, sessionTitle: String, streamID: String?) {
+        starts.append((sessionID, sessionTitle, streamID))
+    }
+
+    func update(_ event: AgentLiveActivityEvent) {
+        updates.append(event)
+    }
+
+    func markStale() {
+        markStaleCount += 1
+    }
+
+    func end(status: AgentRunActivityStatus, activity: String, errorSummary: String?) {
+        ends.append(End(status: status, activity: activity, errorSummary: errorSummary))
     }
 }
