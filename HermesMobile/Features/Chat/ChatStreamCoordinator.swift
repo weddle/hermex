@@ -92,6 +92,25 @@ protocol ChatStreamCoordinatorDelegate: AnyObject {
 /// id of the live turn (it is what Hermex's `SessionSummary.activeStreamId`
 /// carried). Replay/`after_seq` is replaced by `session.resume`, which returns
 /// the durable transcript (including any in-flight projection).
+/// Factory for the persistent gateway client a chat connection uses. The real
+/// app hands back a `HermesGatewayClient`; tests substitute a scripted gateway
+/// so coordinator lifecycle (connect, resume, prompt.submit, event routing,
+/// epoch rejection) is exercised without a live WebSocket.
+@MainActor
+protocol GatewayClientProviding: AnyObject {
+    var isConnected: Bool { get }
+    var onEvent: ((GatewayEvent) -> Void)? { get set }
+    var onDisconnected: (() -> Void)? { get set }
+
+    func connect() async throws
+    func disconnect()
+    func resumeSession(_ sessionID: String) async throws -> GatewayResumeResult
+    func submitPrompt(sessionID: String, text: String, rewindOrdinal: Int?) async throws
+    func interrupt(sessionID: String) async throws
+}
+
+extension HermesGatewayClient: GatewayClientProviding {}
+
 @MainActor
 @Observable
 final class ChatStreamCoordinator {
@@ -102,9 +121,14 @@ final class ChatStreamCoordinator {
     private var showsLiveActivityResponseExcerpts: Bool
 
     // Gateway connection state.
-    @ObservationIgnored private var gatewayClient: HermesGatewayClient?
+    @ObservationIgnored private var gatewayClient: (any GatewayClientProviding)?
     private var connectionEpoch = 0
     private var reconnectTask: Task<Void, Never>?
+    /// Builds a gateway client for a fresh connection epoch. Production uses
+    /// `HermesGatewayClient`; tests inject a scripted gateway. The fabricator
+    /// lives here (not in `APIClient`) so reconnects mint a fresh client and
+    /// so unit tests can observe the single-use-ticket → connect lifecycle.
+    private let gatewayFabricator: @MainActor (URL, String, String?) -> any GatewayClientProviding
 
     // Observable state (kept compatible with ChatViewModel).
     private(set) var activeStreamID: String?
@@ -126,12 +150,16 @@ final class ChatStreamCoordinator {
         client: APIClient,
         liveActivityManager: any AgentLiveActivityManaging,
         showsLiveActivityResponseExcerpts: Bool,
-        timing: ChatStreamCoordinatorTiming = .standard
+        timing: ChatStreamCoordinatorTiming = .standard,
+        gatewayFabricator: @escaping @MainActor (URL, String, String?) -> any GatewayClientProviding = { baseURL, ticket, profile in
+            HermesGatewayClient(baseURL: baseURL, ticket: ticket, profile: profile, customHeaders: [])
+        }
     ) {
         self.client = client
         self.liveActivityManager = liveActivityManager
         self.showsLiveActivityResponseExcerpts = showsLiveActivityResponseExcerpts
         self.timing = timing
+        self.gatewayFabricator = gatewayFabricator
     }
 
     func attach(delegate: any ChatStreamCoordinatorDelegate) {
@@ -183,12 +211,7 @@ final class ChatStreamCoordinator {
             // Discard a stale epoch's connection if a newer one superseded us.
             guard epoch == connectionEpoch else { return }
 
-            let gateway = HermesGatewayClient(
-                baseURL: client.baseURL,
-                ticket: ticket,
-                profile: profileName,
-                customHeaders: []
-            )
+            let gateway = gatewayFabricator(client.baseURL, ticket, profileName)
             gateway.onEvent = { [weak self] event in
                 self?.handleGatewayEvent(event, epoch: epoch)
             }
@@ -793,7 +816,7 @@ final class ChatStreamCoordinator {
 
     // MARK: - Gateway command helper
 
-    private func gatewayCommand(_ body: @escaping @MainActor (HermesGatewayClient) async throws -> Void) async throws {
+    private func gatewayCommand(_ body: @escaping @MainActor (any GatewayClientProviding) async throws -> Void) async throws {
         if let gatewayClient, gatewayClient.isConnected {
             try await body(gatewayClient)
             return
@@ -804,14 +827,9 @@ final class ChatStreamCoordinator {
         try await body(gateway)
     }
 
-    private func makeConnectedGateway() async throws -> HermesGatewayClient {
+    private func makeConnectedGateway() async throws -> any GatewayClientProviding {
         let ticket = try await client.mintWebSocketTicket(profile: profileName)
-        let gateway = HermesGatewayClient(
-            baseURL: client.baseURL,
-            ticket: ticket,
-            profile: profileName,
-            customHeaders: []
-        )
+        let gateway = gatewayFabricator(client.baseURL, ticket, profileName)
         gateway.onEvent = { [weak self] event in
             self?.handleGatewayEvent(event, epoch: self?.connectionEpoch ?? 0)
         }

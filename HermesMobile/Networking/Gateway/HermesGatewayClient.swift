@@ -122,6 +122,22 @@ final class HermesGatewayClient {
     var onEvent: ((GatewayEvent) -> Void)?
     var onDisconnected: (() -> Void)?
 
+    /// Test seam: when set, `connect()` completes immediately without opening a
+    /// real WebSocket and the JSON-RPC delivery path routes through this closure
+    /// instead of the socket. This lets request-correlation and disconnect tests
+    /// run `HermesGatewayClient` without a live server. Production callers never
+    /// set it, so the transport behavior is byte-identical.
+    var testSendFrame: (@MainActor (String) -> Void)?
+    private var usesTestTransport = false
+
+    /// Test seam: injects an inbound JSON-RPC frame exactly as the receive loop
+    /// would (bypassing the WebSocket). Session-scoped assertion hooks like the
+    /// request-correlation tests use this to deliver responses out of order and
+    /// event notifications.
+    func testDeliverFrame(_ text: String) {
+        handleMessage(data: Data(text.utf8))
+    }
+
     static let requestTimeout: TimeInterval = 30
     static let promptSubmitTimeout: TimeInterval = 180 // 3 minutes
 
@@ -166,6 +182,15 @@ final class HermesGatewayClient {
 
         var request = URLRequest(url: url)
         customHeaders.apply(to: &request)
+        // Test seam: connect without a real socket and route the JSON-RPC send
+        // path through the injected closure.
+        if let testSendFrame {
+            usesTestTransport = true
+            socketHasOpened = true
+            isConnected = true
+            gatewayClientLogger.notice("Test transport: handshake completed")
+            return
+        }
         let socket = session.webSocketTask(with: request)
         self.socket = socket
         socket.resume()
@@ -294,7 +319,7 @@ final class HermesGatewayClient {
     // MARK: - RPC
 
     private func rpc(_ method: String, params: [String: Any]? = nil, timeout: TimeInterval = HermesGatewayClient.requestTimeout) async throws -> GatewayValue {
-        guard let socket, socket.closeCode == .invalid else {
+        guard usesTestTransport || (socket?.closeCode == .invalid) else {
             throw GatewayError.notConnected
         }
 
@@ -327,7 +352,12 @@ final class HermesGatewayClient {
                 // The Hermes gateway accepts the connection but does not dispatch
                 // binary JSON-RPC frames; send text frames only.
                 let text = String(decoding: body, as: UTF8.self)
-                socket.send(.string(text)) { [weak self] error in
+                if usesTestTransport,
+                   let testSendFrame {
+                    testSendFrame(text)
+                    return
+                }
+                socket?.send(.string(text)) { [weak self] error in
                     if let error {
                         gatewayClientLogger.error("RPC send failed for \(method, privacy: .public): \(error.localizedDescription, privacy: .public)")
                         Task { @MainActor in

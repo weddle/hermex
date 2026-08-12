@@ -124,16 +124,21 @@ final class MockAuthAPIClient: AuthAPIClient, @unchecked Sendable {
     private let loginResponse: LoginResponse
     private let logoutBehavior: LogoutBehavior
     private(set) var loginPasswords: [String] = []
+    private(set) var loginUsernames: [String] = []
     private(set) var logoutCallCount = 0
+    private(set) var ticketRequests: [String?] = []
+    var ticket: String?
 
     init(
         authStatus: AuthStatusResponse,
         loginResponse: LoginResponse = LoginResponse(ok: true, message: nil, error: nil),
-        logoutBehavior: LogoutBehavior = .succeed
+        logoutBehavior: LogoutBehavior = .succeed,
+        ticket: String? = "fresh-ticket"
     ) {
         self.authStatusResponse = authStatus
         self.loginResponse = loginResponse
         self.logoutBehavior = logoutBehavior
+        self.ticket = ticket
     }
 
     func health() async throws -> HealthResponse {
@@ -144,9 +149,20 @@ final class MockAuthAPIClient: AuthAPIClient, @unchecked Sendable {
         authStatusResponse
     }
 
-    func login(password: String) async throws -> LoginResponse {
+    func login(username: String, password: String) async throws -> LoginResponse {
+        loginUsernames.append(username)
         loginPasswords.append(password)
         return loginResponse
+    }
+
+    func mintWebSocketTicket(profile: String?) async throws -> String {
+        ticketRequests.append(profile)
+        guard let ticket else {
+            throw APIError.decoding(underlying: DecodingError.dataCorrupted(
+                .init(codingPath: [], debugDescription: "Missing WebSocket ticket in response.")
+            ))
+        }
+        return ticket
     }
 
     func logout() async throws -> LoginResponse {

@@ -285,7 +285,10 @@ final class ChatViewModel {
         streamingMaxRevealLagNanoseconds: UInt64 = 1_000_000_000,
         speechSynthesizerFactory: @escaping () -> any ChatSpeechSynthesizing = { AVSpeechSynthesizer() },
         listenAudioSession: (any ListenAudioSessionControlling)? = nil,
-        userDefaults: UserDefaults = .standard
+        userDefaults: UserDefaults = .standard,
+        gatewayFabricator: @escaping @MainActor (URL, String, String?) -> any GatewayClientProviding = { baseURL, ticket, profile in
+            HermesGatewayClient(baseURL: baseURL, ticket: ticket, profile: profile, customHeaders: [])
+        }
     ) {
         sessionID = session.sessionId
         currentWorkspace = session.workspace
@@ -300,7 +303,8 @@ final class ChatViewModel {
         self.streamCoordinator = ChatStreamCoordinator(
             client: resolvedClient,
             liveActivityManager: resolvedLiveActivityManager,
-            showsLiveActivityResponseExcerpts: showsLiveActivityResponseExcerpts
+            showsLiveActivityResponseExcerpts: showsLiveActivityResponseExcerpts,
+            gatewayFabricator: gatewayFabricator
         )
         self.pendingActionCoordinator = ChatPendingActionCoordinator(
             client: resolvedClient
