@@ -24,19 +24,14 @@ enum Endpoint {
     case moveSession
     case sessionYolo(sessionID: String?)
     case exportSession(sessionID: String, format: SessionExportFormat)
-    case chatStart
     case chatStreamStatus(streamID: String)
     case chatSteer
-    case workspaces
+    case workspaceRoots
     case workspaceSuggestions(prefix: String)
-    case workspaceAdd
-    case workspaceRemove
-    case workspaceRename
-    case workspaceReorder
-    case directoryList(sessionID: String, path: String?)
-    case file(sessionID: String, path: String)
-    case rawFile(sessionID: String, path: String)
-    case media(sessionID: String, path: String)
+    case directoryList(path: String?)
+    case file(path: String)
+    case rawFile(path: String)
+    case media(path: String)
     case gitInfo(sessionID: String)
     case gitStatus(sessionID: String)
     case gitBranches(sessionID: String)
@@ -130,32 +125,20 @@ enum Endpoint {
             return "/api/session/yolo"
         case .exportSession:
             return "/api/session/export"
-        case .chatStart:
-            return "/api/chat/start"
         case .chatStreamStatus:
             return "/api/chat/stream/status"
         case .chatSteer:
             return "/api/chat/steer"
-        case .workspaces:
-            return "/api/workspaces"
+        case .workspaceRoots:
+            return "/api/fs/default-cwd"
         case .workspaceSuggestions:
-            return "/api/workspaces/suggest"
-        case .workspaceAdd:
-            return "/api/workspaces/add"
-        case .workspaceRemove:
-            return "/api/workspaces/remove"
-        case .workspaceRename:
-            return "/api/workspaces/rename"
-        case .workspaceReorder:
-            return "/api/workspaces/reorder"
+            return "/api/fs/list"
         case .directoryList:
-            return "/api/list"
+            return "/api/fs/list"
         case .file:
-            return "/api/file"
-        case .rawFile:
-            return "/api/file/raw"
-        case .media:
-            return "/api/media"
+            return "/api/fs/read-text"
+        case .rawFile, .media:
+            return "/api/files/download"
         case .gitInfo:
             return "/api/git-info"
         case .gitStatus:
@@ -301,25 +284,15 @@ enum Endpoint {
                 URLQueryItem(name: "session_id", value: sessionID),
                 URLQueryItem(name: "format", value: format.rawValue)
             ]
-        case let .directoryList(sessionID, path):
-            var items = [URLQueryItem(name: "session_id", value: sessionID)]
-            if let path {
-                items.append(URLQueryItem(name: "path", value: path))
-            }
-            return items
+        case let .directoryList(path):
+            guard let path, !path.isEmpty else { return [] }
+            return [URLQueryItem(name: "path", value: path)]
         case let .workspaceSuggestions(prefix):
-            return [URLQueryItem(name: "prefix", value: prefix)]
-        case let .file(sessionID, path),
-            let .rawFile(sessionID, path):
-            return [
-                URLQueryItem(name: "session_id", value: sessionID),
-                URLQueryItem(name: "path", value: path)
-            ]
-        case let .media(sessionID, path):
-            return [
-                URLQueryItem(name: "session_id", value: sessionID),
-                URLQueryItem(name: "path", value: path)
-            ]
+            return [URLQueryItem(name: "path", value: prefix)]
+        case let .file(path), let .rawFile(path):
+            return [URLQueryItem(name: "path", value: path)]
+        case let .media(path):
+            return [URLQueryItem(name: "path", value: path)]
         case let .gitInfo(sessionID),
             let .gitStatus(sessionID),
             let .gitBranches(sessionID):

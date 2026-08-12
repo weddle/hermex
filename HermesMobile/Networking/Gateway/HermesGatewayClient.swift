@@ -517,11 +517,28 @@ final class HermesGatewayClient {
         _ = try await rpc("session.workspace.move", params: params)
     }
 
-    func submitPrompt(sessionID: String, text: String) async throws {
-        _ = try await rpc("prompt.submit", params: [
+    /// Submits a user prompt over the gateway (`prompt.submit`).
+    ///
+    /// When `rewindOrdinal` is set this is a rewind/edit/regenerate: the
+    /// gateway drops the `rewindOrdinal`-th user turn (0-based) and everything
+    /// after it before running `text`. The ordinal is exactly the count of
+    /// user-role messages before the target, and a stem-only rewind of user
+    /// turn 0 (which would wipe the whole transcript) additionally opt-in via
+    /// `confirm_empty_truncate` — mirroring the upstream desktop client's
+    /// `truncateSubmitParams` and `tui_gateway/methods_prompt.py`.
+    func submitPrompt(sessionID: String, text: String, rewindOrdinal: Int? = nil) async throws {
+        var params: [String: Any] = [
             "session_id": sessionID,
             "text": text
-        ], timeout: HermesGatewayClient.promptSubmitTimeout)
+        ]
+        if let rewindOrdinal {
+            params["confirm_truncate"] = true
+            params["truncate_before_user_ordinal"] = rewindOrdinal
+            if rewindOrdinal == 0 {
+                params["confirm_empty_truncate"] = true
+            }
+        }
+        _ = try await rpc("prompt.submit", params: params, timeout: HermesGatewayClient.promptSubmitTimeout)
     }
 
     func interrupt(sessionID: String) async throws {

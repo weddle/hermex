@@ -511,16 +511,6 @@ final class ChatViewModel {
         Self.nonEmpty(currentModelProvider)
     }
 
-    private func explicitModelPickForChatStart() -> Bool {
-        pendingExplicitModelPick && Self.nonEmpty(currentModel) != nil
-    }
-
-    private func completeExplicitModelPickForChatStart(_ explicitModelPick: Bool) {
-        if explicitModelPick {
-            pendingExplicitModelPick = false
-        }
-    }
-
     func loadComposerConfiguration() async {
         if isLoadingComposerConfiguration {
             needsComposerConfigurationReload = true
@@ -1324,6 +1314,36 @@ final class ChatViewModel {
         return nil
     }
 
+    /// The 0-based gateway user-turn ordinal of the user message at `userIndex`:
+    /// the count of user-role messages at indices `< userIndex`. This is the
+    /// `truncate_before_user_ordinal` value the gateway's `prompt.submit` rewind
+    /// uses to drop that user turn and everything after it (see
+    /// `HermesGatewayClient.submitPrompt`).
+    nonisolated static func userTurnOrdinal(
+        in messages: [ChatMessage],
+        at userIndex: Int
+    ) -> Int? {
+        guard userIndex >= 0, userIndex < messages.count else { return nil }
+        guard messages[userIndex].role == "user" else { return nil }
+        return messages[0..<userIndex].filter { $0.role == "user" }.count
+    }
+
+    /// The index of the nearest user message at or before `visibleIndex`.
+    nonisolated static func precedingUserMessageIndex(
+        in messages: [ChatMessage],
+        beforeVisibleIndex visibleIndex: Int
+    ) -> Int? {
+        guard visibleIndex > 0 else { return nil }
+        let startIndex = min(visibleIndex - 1, messages.count - 1)
+        guard startIndex >= 0 else { return nil }
+        for index in stride(from: startIndex, through: 0, by: -1) {
+            if messages[index].role == "user" {
+                return index
+            }
+        }
+        return nil
+    }
+
     nonisolated static func mergingLoadedMessages(
         _ loadedMessages: [ChatMessage],
         withCachedLocalOptimisticMessages cachedMessages: [ChatMessage]
@@ -1789,8 +1809,9 @@ final class ChatViewModel {
         // in flight. `performChatSend` has no internal guard, so two overlapping
         // sends would both flip `isStartingChat`/`isSendingVoiceNote` and race their
         // `defer { … = false }` (clearing the flag while the other still runs, and
-        // firing two concurrent `startChat`s). The UI already blocks this; the guard
-        // keeps a future caller (accessibility shortcut, test harness) safe too.
+        // firing two concurrent gateway `prompt.submit`s). The UI already blocks
+        // this; the guard keeps a future caller (accessibility shortcut, test
+        // harness) safe too.
         guard !isSendingVoiceNote, !isStartingChat else { return false }
         guard !isViewingCachedData else {
             setUploadAttachmentError(String(localized: "Reconnect to the server to send a voice note."))
@@ -1928,10 +1949,16 @@ final class ChatViewModel {
         }
     }
 
-    /// Shared optimistic-append + `startChat` + rollback core used by both the
-    /// text composer (`sendMessage`) and the voice-note flow (`sendVoiceNote`).
-    /// `attachmentsToRestoreOnFailure` is re-staged into the composer if the send
-    /// fails — empty for voice notes, whose clip isn't a composer attachment.
+    /// Shared optimistic-append + gateway `prompt.submit` + rollback core used
+    /// by both the text composer (`sendMessage`) and the voice-note flow
+    /// (`sendVoiceNote`). `attachmentsToRestoreOnFailure` is re-staged into the
+    /// composer if the send fails — empty for voice notes, whose clip isn't a
+    /// composer attachment.
+    ///
+    /// Unlike the old WebUI flow there is no REST `/api/chat/start` and no
+    /// server-issued stream ID: `prompt.submit` needs only the session id, so
+    /// `streamCoordinator.beginTurn` resumes the session over the persistent
+    /// gateway and submits the prompt in one lifecycle.
     private func performChatSend(
         sessionID: String,
         localMessageID: String,
@@ -1967,48 +1994,9 @@ final class ChatViewModel {
         cacheCurrentMessages(sessionID: sessionID, modelContext: modelContext)
 
         do {
-            let explicitModelPick = explicitModelPickForChatStart()
-            let response = try await client.startChat(
-                sessionID: sessionID,
-                message: messageForAPI,
-                workspace: currentWorkspace,
-                model: currentModel,
-                modelProvider: requestModelProvider,
-                profile: requestProfileName,
-                explicitModelPick: explicitModelPick,
-                attachments: apiPayloads
-            )
-
-            guard let streamID = response.streamId else {
-                sendErrorMessage = response.error ?? String(localized: "The server did not return a stream ID.")
-                rollbackOptimisticMessage(id: localMessageID)
-                cacheCurrentMessages(sessionID: sessionID, modelContext: modelContext)
-                restorePendingAttachments(attachmentsToRestoreOnFailure)
-                return false
-            }
-
-            completeExplicitModelPickForChatStart(explicitModelPick)
-            await streamCoordinator.start(streamID: streamID)
+            try await streamCoordinator.beginTurn(sessionID: sessionID, prompt: messageForAPI)
             return true
         } catch {
-            if let streamID = (error as? APIError)?.activeStreamID {
-                rollbackOptimisticMessage(id: localMessageID)
-                cacheCurrentMessages(sessionID: sessionID, modelContext: modelContext)
-                restorePendingAttachments(attachmentsToRestoreOnFailure)
-                // The existing run may have started outside this view model. Reconcile
-                // the server transcript first so the SSE tokens attach to the persisted
-                // assistant turn instead of creating a second bubble with only the tail.
-                await loadMessages(modelContext: modelContext)
-                _ = restoreActiveStreamSnapshotIfAvailable(streamID: streamID)
-                streamingAssistantMessageID = TranscriptTurnClassifier
-                    .currentTurnAssistantAnchorIDs(in: messages, messageOffset: messagesOffset)
-                    .first
-                await streamCoordinator.start(streamID: streamID)
-                // The server kept the earlier run, not this newly submitted text.
-                // Report an unaccepted send so ChatView restores the draft while
-                // the coordinator reconnects to the existing response.
-                return false
-            }
             lastError = error
             sendErrorMessage = error.localizedDescription
             rollbackOptimisticMessage(id: localMessageID)
@@ -2102,10 +2090,6 @@ final class ChatViewModel {
             return await searchSkillsFromSlashCommand(args)
         case .branch:
             return await branchSessionFromSlashCommand(args)
-        case .undo:
-            return await undoLastExchangeFromSlashCommand()
-        case .retry:
-            return await retryLastTurnFromSlashCommand()
         case .compress:
             return await compressSessionFromSlashCommand(args)
         case .queue:
@@ -2661,148 +2645,6 @@ final class ChatViewModel {
         }
     }
 
-    private func undoLastExchangeFromSlashCommand() async -> SlashCommandExecutionResult {
-        guard !isViewingCachedData else {
-            return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to undo messages."))
-        }
-
-        guard !isCLISession else {
-            return .unsupported(friendlyMessage: String(localized: "Undo is available for WebUI sessions only."))
-        }
-
-        guard activeStreamID == nil else {
-            return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before undoing messages."))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        lastError = nil
-        sendErrorMessage = nil
-
-        do {
-            let response = try await client.undoSession(id: sessionID)
-            if let error = response.error {
-                return .unsupported(friendlyMessage: error)
-            }
-
-            await loadMessages()
-            if let lastError {
-                return .unsupported(friendlyMessage: lastError.localizedDescription)
-            }
-
-            return .executed(message: nil)
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
-    }
-
-    private func retryLastTurnFromSlashCommand() async -> SlashCommandExecutionResult {
-        guard !isViewingCachedData else {
-            return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to retry messages."))
-        }
-
-        guard !isCLISession else {
-            return .unsupported(friendlyMessage: String(localized: "Retry is available for WebUI sessions only."))
-        }
-
-        guard activeStreamID == nil else {
-            return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before retrying messages."))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        isStartingChat = true
-        lastError = nil
-        sendErrorMessage = nil
-        archiveLiveReasoningIfNeeded()
-        archiveLiveToolCallsIfNeeded()
-        liveReasoningText = ""
-        liveToolCalls = []
-        reasoningAnchorMessageID = nil
-        toolCallAnchorMessageID = nil
-        streamCoordinator.prepareForNewResponse()
-        responseCompletionNeedsTranscriptRefresh = false
-        defer { isStartingChat = false }
-
-        do {
-            let retryResponse = try await client.retrySession(id: sessionID)
-            if let error = retryResponse.error {
-                return .unsupported(friendlyMessage: error)
-            }
-
-            let lastUserText = retryResponse.lastUserText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !lastUserText.isEmpty else {
-                return .unsupported(friendlyMessage: String(localized: "The server did not return a message to retry."))
-            }
-
-            // Post-retry reload is NOT treated as a cold load (issue #168 non-goal): the
-            // user already has the transcript in view, so keep the raw msg_limit cap and
-            // leave expandRenderable at its default false.
-            let sessionResponse = try await client.session(
-                id: sessionID,
-                includeMessages: true,
-                messageLimit: Self.messagePageLimit
-            )
-            if let session = sessionResponse.session {
-                messages = session.messages ?? []
-                updateOlderMessagePagination(from: session, loadedMessageCount: messages.count)
-                setCompletedToolCallGroups(ToolCallGroup.groups(
-                    persistedToolCalls: session.toolCalls ?? [],
-                    messages: messages,
-                    messageOffset: messagesOffset
-                ))
-                completedReasoningGroups = []
-            } else {
-                await loadMessages()
-                if let lastError {
-                    return .unsupported(friendlyMessage: lastError.localizedDescription)
-                }
-            }
-
-            liveToolCalls = []
-            liveReasoningText = ""
-            toolCallAnchorMessageID = nil
-            reasoningAnchorMessageID = nil
-            attachmentCoordinator.removeAllLocalPreviews()
-
-            let explicitModelPick = explicitModelPickForChatStart()
-            let chatResponse = try await client.startChat(
-                sessionID: sessionID,
-                message: lastUserText,
-                workspace: currentWorkspace,
-                model: currentModel,
-                modelProvider: requestModelProvider,
-                profile: requestProfileName,
-                explicitModelPick: explicitModelPick
-            )
-
-            guard let streamID = chatResponse.streamId else {
-                return .unsupported(friendlyMessage: chatResponse.error ?? String(localized: "The server did not return a stream ID after retrying."))
-            }
-
-            completeExplicitModelPickForChatStart(explicitModelPick)
-            messages.append(
-                ChatMessage(
-                    role: "user",
-                    content: lastUserText,
-                    timestamp: Date().timeIntervalSince1970,
-                    messageId: "local-\(UUID().uuidString)"
-                )
-            )
-
-            await streamCoordinator.start(streamID: streamID)
-            return .executed(message: nil)
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
-    }
-
     private func canRunConfigurationSlashCommand(_ actionDescription: String) -> Bool {
         if isViewingCachedData {
             composerConfigurationErrorMessage = String(localized: "Reconnect to the server to \(actionDescription).")
@@ -2964,7 +2806,9 @@ final class ChatViewModel {
         }
     }
 
-    /// Edit a user message: truncate to just before the selected message, then send the edited text.
+    /// Edit a user message: rewind the session to just before the selected user
+    /// turn (via `prompt.submit`'s `truncate_before_user_ordinal`), then submit
+    /// the edited text with the gateway.
     func editMessage(_ context: MessageActionContext, newText: String, modelContext: ModelContext? = nil) async -> Bool {
         guard context.role == .user else {
             messageActionErrorMessage = String(localized: "Only user messages can be edited.")
@@ -2992,61 +2836,38 @@ final class ChatViewModel {
             return false
         }
 
+        guard let rewindOrdinal = Self.userTurnOrdinal(in: messages, at: context.visibleIndex) else {
+            messageActionErrorMessage = String(localized: "The message being edited is no longer in the loaded transcript.")
+            return false
+        }
+
         isEditingMessage = true
         messageActionErrorMessage = nil
         lastError = nil
+        archiveLiveReasoningIfNeeded()
+        archiveLiveToolCallsIfNeeded()
+        liveReasoningText = ""
+        liveToolCalls = []
+        reasoningAnchorMessageID = nil
+        toolCallAnchorMessageID = nil
         defer { isEditingMessage = false }
 
         do {
-            // Truncate to remove the selected user message and everything after it
-            let truncateResponse = try await client.truncateSession(
-                id: sessionID,
-                keepCount: context.fullHistoryIndex
-            )
-
-            // Update local state from the truncated response
-            if let session = truncateResponse.session {
-                messages = session.messages ?? []
-                updateOlderMessagePagination(from: session, loadedMessageCount: messages.count)
-                setCompletedToolCallGroups(ToolCallGroup.groups(
-                    persistedToolCalls: session.toolCalls ?? [],
-                    messages: messages,
-                    messageOffset: messagesOffset
-                ))
-                completedReasoningGroups = []
-                liveToolCalls = []
-                liveReasoningText = ""
-                toolCallAnchorMessageID = nil
-                reasoningAnchorMessageID = nil
-
-                if let modelContext {
-                    do {
-                        try CacheStore.cacheMessages(messages, serverURL: server, sessionID: sessionID, in: modelContext)
-                    } catch {
-                        cacheErrorMessage = error.localizedDescription
-                    }
+            // The gateway rewinds the transcript (drops the target user turn and
+            // everything after it) inside prompt.submit; optimistically tighten
+            // the local transcript to match so nothing stale remains on screen.
+            messages = Array(messages.prefix(context.visibleIndex))
+            if let modelContext {
+                do {
+                    try CacheStore.cacheMessages(messages, serverURL: server, sessionID: sessionID, in: modelContext)
+                } catch {
+                    cacheErrorMessage = error.localizedDescription
                 }
             }
 
-            // Now send the edited text through the normal chat flow
-            let explicitModelPick = explicitModelPickForChatStart()
-            let chatResponse = try await client.startChat(
-                sessionID: sessionID,
-                message: editedText,
-                workspace: currentWorkspace,
-                model: currentModel,
-                modelProvider: requestModelProvider,
-                profile: requestProfileName,
-                explicitModelPick: explicitModelPick
-            )
-
-            guard let streamID = chatResponse.streamId else {
-                messageActionErrorMessage = chatResponse.error ?? String(localized: "The server did not return a stream ID after editing.")
-                return false
-            }
-
-            completeExplicitModelPickForChatStart(explicitModelPick)
-            // Append the optimistic user message
+            streamCoordinator.prepareForNewResponse()
+            responseCompletionNeedsTranscriptRefresh = false
+            // Append the optimistic edited user message
             messages.append(
                 ChatMessage(
                     role: "user",
@@ -3055,10 +2876,11 @@ final class ChatViewModel {
                     messageId: "local-\(UUID().uuidString)"
                 )
             )
-
-            streamCoordinator.prepareForNewResponse()
-            responseCompletionNeedsTranscriptRefresh = false
-            await streamCoordinator.start(streamID: streamID)
+            try await streamCoordinator.beginTurn(
+                sessionID: sessionID,
+                prompt: editedText,
+                rewindOrdinal: rewindOrdinal
+            )
             return true
         } catch {
             lastError = error
@@ -3096,61 +2918,48 @@ final class ChatViewModel {
             return false
         }
 
+        guard let playerUserIndex = Self.precedingUserMessageIndex(in: messages, beforeVisibleIndex: context.visibleIndex) else {
+            messageActionErrorMessage = String(localized: "The message being regenerated is no longer in the loaded transcript.")
+            return false
+        }
+        guard let rewindOrdinal = Self.userTurnOrdinal(in: messages, at: playerUserIndex) else {
+            messageActionErrorMessage = String(localized: "The message being regenerated is no longer in the loaded transcript.")
+            return false
+        }
+
         isRegeneratingMessage = true
         messageActionErrorMessage = nil
         lastError = nil
         stopListening()
+        archiveLiveReasoningIfNeeded()
+        archiveLiveToolCallsIfNeeded()
+        liveReasoningText = ""
+        liveToolCalls = []
+        reasoningAnchorMessageID = nil
+        toolCallAnchorMessageID = nil
         defer { isRegeneratingMessage = false }
 
         do {
-            let truncateResponse = try await client.truncateSession(
-                id: sessionID,
-                keepCount: context.fullHistoryIndex
-            )
-
-            if let session = truncateResponse.session {
-                messages = session.messages ?? []
-                updateOlderMessagePagination(from: session, loadedMessageCount: messages.count)
-                setCompletedToolCallGroups(ToolCallGroup.groups(
-                    persistedToolCalls: session.toolCalls ?? [],
-                    messages: messages,
-                    messageOffset: messagesOffset
-                ))
-                completedReasoningGroups = []
-                liveToolCalls = []
-                liveReasoningText = ""
-                toolCallAnchorMessageID = nil
-                reasoningAnchorMessageID = nil
-
-                if let modelContext {
-                    do {
-                        try CacheStore.cacheMessages(messages, serverURL: server, sessionID: sessionID, in: modelContext)
-                    } catch {
-                        cacheErrorMessage = error.localizedDescription
-                    }
+            // Same gateway rewind as edit; the local transcript keeps the user
+            // turn (the session id is unchanged, and prompt.submit's ordinal
+            // targets the user turn + everything after it) and drops the stale
+            // assistant tail.
+            messages = Array(messages.prefix(playerUserIndex + 1))
+            if let modelContext {
+                do {
+                    try CacheStore.cacheMessages(messages, serverURL: server, sessionID: sessionID, in: modelContext)
+                } catch {
+                    cacheErrorMessage = error.localizedDescription
                 }
             }
 
-            let explicitModelPick = explicitModelPickForChatStart()
-            let chatResponse = try await client.startChat(
-                sessionID: sessionID,
-                message: userText,
-                workspace: currentWorkspace,
-                model: currentModel,
-                modelProvider: requestModelProvider,
-                profile: requestProfileName,
-                explicitModelPick: explicitModelPick
-            )
-
-            guard let streamID = chatResponse.streamId else {
-                messageActionErrorMessage = chatResponse.error ?? String(localized: "The server did not return a stream ID after regenerating.")
-                return false
-            }
-
-            completeExplicitModelPickForChatStart(explicitModelPick)
             streamCoordinator.prepareForNewResponse()
             responseCompletionNeedsTranscriptRefresh = false
-            await streamCoordinator.start(streamID: streamID)
+            try await streamCoordinator.beginTurn(
+                sessionID: sessionID,
+                prompt: userText,
+                rewindOrdinal: rewindOrdinal
+            )
             return true
         } catch {
             lastError = error

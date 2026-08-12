@@ -134,10 +134,8 @@ final class ChatAttachmentCoordinator {
     }
 
     func attachmentImageData(path: String) async -> Data? {
-        guard let sessionID = delegate?.attachmentSessionID else { return nil }
-
         do {
-            let data = try await client.rawFileData(sessionID: sessionID, path: path)
+            let data = try await client.rawFileData(path: path)
             return await ImagePreviewDownsampler.previewDataAsync(
                 from: data,
                 maxPixelSize: ImagePreviewDownsampler.attachmentMaxPixelSize
@@ -150,10 +148,8 @@ final class ChatAttachmentCoordinator {
     /// Raw attachment bytes with no image downsampling — used by the inline
     /// audio player, which needs the original encoded audio data intact.
     func attachmentRawData(path: String) async -> Data? {
-        guard let sessionID = delegate?.attachmentSessionID else { return nil }
-
         do {
-            return try await client.rawFileData(sessionID: sessionID, path: path)
+            return try await client.rawFileData(path: path)
         } catch {
             return nil
         }

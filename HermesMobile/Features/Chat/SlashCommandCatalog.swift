@@ -88,18 +88,6 @@ enum SlashCommandCatalog {
             handler: .serverSide(.compress)
         ),
         SlashCommand(
-            name: "retry",
-            description: String(localized: "Retry the last turn"),
-            noEcho: true,
-            handler: .serverSide(.retry)
-        ),
-        SlashCommand(
-            name: "undo",
-            description: String(localized: "Undo the last exchange"),
-            noEcho: true,
-            handler: .serverSide(.undo)
-        ),
-        SlashCommand(
             name: "branch",
             description: String(localized: "Fork the conversation"),
             argHint: String(localized: "name"),

@@ -62,12 +62,16 @@ final class FileBrowserViewModel {
 
     @MainActor
     func loadRoot() async {
-        await load(path: ".")
+        // The native `/api/fs/*` routes resolve paths relative to the
+        // dashboard's working directory, so "root" resolves to the default cwd
+        // rather than the filesystem root.
+        currentPath = await resolveDefaultRoot()
+        await load(path: currentPath)
     }
 
     @MainActor
     func reloadCurrentPath() async {
-        await load(path: currentPath)
+        await load(path: currentPath == "." ? (await resolveDefaultRoot()) : currentPath)
     }
 
     @MainActor
@@ -76,12 +80,15 @@ final class FileBrowserViewModel {
     }
 
     @MainActor
-    func load(path: String) async {
-        guard let sessionID = session.sessionId else {
-            errorMessage = String(localized: "Session ID is missing.")
-            return
+    private func resolveDefaultRoot() async -> String {
+        if let path = (try? await apiClient.workspaces())?.last, !path.isEmpty {
+            return path
         }
+        return "."
+    }
 
+    @MainActor
+    func load(path: String) async {
         lastRequestedPath = path
         loadRevision += 1
         let revision = loadRevision
@@ -90,7 +97,7 @@ final class FileBrowserViewModel {
         lastError = nil
 
         do {
-            let response = try await apiClient.directoryList(sessionID: sessionID, path: path)
+            let response = try await apiClient.directoryList(path: path == "." ? nil : path)
             guard revision == loadRevision else { return }
             currentPath = response.path ?? path
             entries = response.entries ?? []

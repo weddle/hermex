@@ -22,7 +22,7 @@ final class FilePreviewViewModel {
     }
 
     var canExportFile: Bool {
-        session.sessionId?.isEmpty == false && !path.isEmpty
+        !path.isEmpty
     }
 
     var canSaveImageToPhotos: Bool {
@@ -31,11 +31,6 @@ final class FilePreviewViewModel {
 
     @MainActor
     func load() async {
-        guard let sessionID = session.sessionId else {
-            errorMessage = String(localized: "Session ID is missing.")
-            return
-        }
-
         guard !path.isEmpty else {
             errorMessage = String(localized: "File path is missing.")
             return
@@ -48,7 +43,7 @@ final class FilePreviewViewModel {
 
         do {
             if isRasterImagePath {
-                let data = try await apiClient.rawFileData(sessionID: sessionID, path: path)
+                let data = try await apiClient.rawFileData(path: path)
                 exportData = data
                 if let previewData = ImagePreviewDownsampler.previewData(
                     from: data,
@@ -61,7 +56,7 @@ final class FilePreviewViewModel {
             } else if isKnownUnsupportedBinaryPath {
                 preview = .unavailable(String(localized: "Preview is not available for this file type."))
             } else {
-                let file = try await apiClient.file(sessionID: sessionID, path: path)
+                let file = try await apiClient.file(path: path)
                 exportData = Data((file.content ?? "").utf8)
                 preview = .text(file)
             }
@@ -75,10 +70,6 @@ final class FilePreviewViewModel {
 
     @MainActor
     func exportPayload() async throws -> FileExportPayload {
-        guard let sessionID = session.sessionId else {
-            throw FileExportError.missingSessionID
-        }
-
         guard !path.isEmpty else {
             throw FileExportError.missingPath
         }
@@ -95,7 +86,7 @@ final class FilePreviewViewModel {
         }
 
         do {
-            let data = try await apiClient.rawFileData(sessionID: sessionID, path: path)
+            let data = try await apiClient.rawFileData(path: path)
             exportData = data
             return payload(with: data)
         } catch {
@@ -163,13 +154,10 @@ struct FileExportPayload {
 }
 
 enum FileExportError: LocalizedError {
-    case missingSessionID
     case missingPath
 
     var errorDescription: String? {
         switch self {
-        case .missingSessionID:
-            String(localized: "Session ID is missing.")
         case .missingPath:
             String(localized: "File path is missing.")
         }

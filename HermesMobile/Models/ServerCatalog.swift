@@ -1,11 +1,5 @@
 import Foundation
 
-struct ChatStartResponse: Decodable, Equatable {
-    let streamId: String?
-    let sessionId: String?
-    let error: String?
-}
-
 struct ChatCancelResponse: Decodable, Equatable {
     let ok: Bool?
     let cancelled: Bool?

@@ -229,7 +229,6 @@ struct ChatView: View {
             workspaceRoots: viewModel.workspaceRoots,
             selectedWorkspacePath: viewModel.selectedWorkspacePath,
             workspaceSuggestions: viewModel.workspaceSuggestions,
-            workspaceManagementServer: server,
             personalitySuggestions: viewModel.personalitySuggestions,
             skillSuggestions: viewModel.skillSlashSuggestions,
             agentCommands: viewModel.agentCommands,
@@ -272,9 +271,6 @@ struct ChatView: View {
             },
             onLoadWorkspaceSuggestions: { prefix in
                 await viewModel.loadWorkspaceSuggestions(prefix: prefix)
-            },
-            onWorkspaceRegistryChanged: {
-                await viewModel.refreshWorkspaceRoots()
             },
             onLoadPersonalitySuggestions: {
                 await viewModel.loadPersonalitySuggestions()

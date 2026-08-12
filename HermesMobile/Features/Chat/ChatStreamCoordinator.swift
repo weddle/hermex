@@ -204,17 +204,90 @@ final class ChatStreamCoordinator {
             let resume = try await gateway.resumeSession(sessionID)
             guard epoch == connectionEpoch else { return }
 
-            self.inflightAssistantText = resume.snapshot.inflightAssistantText
-            let inflight = resume.snapshot.inflightAssistantText
-            if resume.snapshot.hasLiveProjection, !inflight.isEmpty,
-               delegate?.streamCoordinatorStreamingAssistantMessageID == nil {
-                // Attach the in-flight prefix to the visible streaming message once.
-                _ = delegate?.streamCoordinatorAppendToken(inflight)
-            }
+            applyResumePayload(resume)
         } catch {
             guard epoch == connectionEpoch else { return }
             delegate?.streamCoordinatorDidReceiveRecoveryError(error)
             handleGatewayError(epoch: epoch)
+        }
+    }
+
+    /// Begins a fresh user turn over the gateway: connects (minting a new
+    /// ticket and epoch), resumes the session, submits the prompt via
+    /// `prompt.submit`, and streams events into the delegate seam.
+    ///
+    /// `rewindOrdinal`, when set, is the 0-based user-turn ordinal for a
+    /// rewind/edit/regenerate: the gateway drops that user turn and everything
+    /// after it before running `prompt` (see `HermesGatewayClient.submitPrompt`).
+    ///
+    /// Throws on any connect/resume/submit failure so the caller can roll back
+    /// its optimistic user message; the coordinator tears down cleanly either
+    /// way, so a later reconnect resumes the session without the failed prompt.
+    func beginTurn(
+        sessionID: String,
+        prompt: String,
+        rewindOrdinal: Int? = nil
+    ) async throws {
+        hasCompletedCurrentResponse = false
+        liveTokensPerSecond = nil
+        runGeneration &+= 1
+        inflightAssistantText = nil
+        connectionEpoch &+= 1
+        let epoch = connectionEpoch
+
+        activeStreamID = sessionID
+        isConnectionSuspended = false
+        lastEventID = nil
+
+        markConnectionStarted(isReplay: false, recoveryState: .idle)
+        startLiveActivity(sessionID: sessionID)
+        delegate?.streamCoordinatorStartAuxiliaryMonitoring()
+
+        do {
+            let gateway = try await makeConnectedGateway()
+            let resume = try await gateway.resumeSession(sessionID)
+            guard epoch == connectionEpoch else { throw CancellationError() }
+            applyResumePayload(resume)
+            try await gateway.submitPrompt(sessionID: sessionID, text: prompt, rewindOrdinal: rewindOrdinal)
+            // If a stray idle `sessionInfo` event finalized the snapshot between
+            // resume and submit, re-open the turn so the incoming stream's
+            // deltas keep routing to the delegate.
+            if activeStreamID == nil {
+                activeStreamID = sessionID
+                hasCompletedCurrentResponse = false
+                isConnectionSuspended = false
+                liveTokensPerSecond = nil
+                delegate?.streamCoordinatorStartAuxiliaryMonitoring()
+                delegate?.streamCoordinatorDidStartConnection(isReplay: false)
+            }
+        } catch {
+            guard epoch == connectionEpoch else { throw CancellationError() }
+            if hasCompletedCurrentResponse {
+                finishStream()
+            } else {
+                delegate?.streamCoordinatorStopAuxiliaryMonitoring(clearPrompt: true)
+                teardownGateway()
+                inflightAssistantText = nil
+                activeStreamID = nil
+                lastEventID = nil
+                liveTokensPerSecond = nil
+                delegate?.streamCoordinatorStreamingAssistantMessageID = nil
+                resetRecoveryState()
+            }
+            throw error
+        }
+    }
+
+    /// Applies the resume snapshot's in-flight projection to the visible
+    /// streaming message once, so new deltas append to it rather than
+    /// duplicate it.
+    private func applyResumePayload(_ resume: GatewayResumeResult) {
+        self.inflightAssistantText = resume.snapshot.inflightAssistantText
+        let inflight = resume.snapshot.inflightAssistantText
+        if resume.snapshot.hasLiveProjection, !inflight.isEmpty,
+           delegate?.streamCoordinatorStreamingAssistantMessageID == nil {
+            // Attach the in-flight prefix to the visible streaming message once.
+            _ = delegate?.streamCoordinatorAppendToken(inflight)
         }
     }
 

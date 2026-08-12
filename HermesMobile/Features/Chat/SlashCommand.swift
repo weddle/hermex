@@ -51,8 +51,6 @@ enum ServerSideAction: String, Equatable {
     case personality
     case skills
     case compress
-    case retry
-    case undo
     case branch
     case queue
     case steer

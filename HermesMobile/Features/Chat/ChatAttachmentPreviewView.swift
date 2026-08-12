@@ -299,11 +299,6 @@ final class ChatAttachmentPreviewViewModel {
         didLoad = true
         preview = nil
 
-        guard let sessionID = session.sessionId else {
-            errorMessage = String(localized: "Session ID is missing.")
-            return
-        }
-
         let trimmedPath = item.path?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let path = trimmedPath, !path.isEmpty else {
             preview = localFallbackPreview
@@ -317,7 +312,7 @@ final class ChatAttachmentPreviewViewModel {
 
         do {
             if item.inferredIsImage {
-                let data = try await apiClient.rawFileData(sessionID: sessionID, path: path)
+                let data = try await apiClient.rawFileData(path: path)
                 if let previewData = ImagePreviewDownsampler.previewData(
                     from: data,
                     maxPixelSize: ImagePreviewDownsampler.filePreviewMaxPixelSize
@@ -330,11 +325,11 @@ final class ChatAttachmentPreviewViewModel {
                 // Raw bytes (no downsampling) so AVAudioPlayer gets the original
                 // encoded audio; checked before the unsupported-binary list,
                 // which would otherwise reject m4a/mp3/wav/flac.
-                preview = .audio(try await apiClient.rawFileData(sessionID: sessionID, path: path))
+                preview = .audio(try await apiClient.rawFileData(path: path))
             } else if item.isKnownUnsupportedBinary {
                 preview = .unavailable(String(localized: "Preview is not available for this file type."))
             } else {
-                preview = .text(try await apiClient.file(sessionID: sessionID, path: path))
+                preview = .text(try await apiClient.file(path: path))
             }
         } catch {
             lastError = error
