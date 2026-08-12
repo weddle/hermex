@@ -703,16 +703,15 @@ final class HermesGatewayClient {
 
     // MARK: - Attachments
 
-    func attachImage(_ sessionID: String, base64: String, filename: String) async throws -> String? {
-        let result = try await rpc("image.attach_bytes", params: [
+    func attachImage(sessionID: String, base64: String, filename: String) async throws {
+        _ = try await rpc("image.attach_bytes", params: [
             "session_id": sessionID,
             "content_base64": base64,
             "filename": filename
         ])
-        return result.objectValue?["path"]?.stringValue
     }
 
-    func attachPDF(_ sessionID: String, base64: String, filename: String) async throws {
+    func attachPDF(sessionID: String, base64: String, filename: String) async throws {
         _ = try await rpc("pdf.attach", params: [
             "session_id": sessionID,
             "content_base64": base64,
@@ -720,7 +719,7 @@ final class HermesGatewayClient {
         ], timeout: 120)
     }
 
-    func attachFile(_ sessionID: String, dataURL: String, name: String, path: String = "") async throws {
+    func attachFile(sessionID: String, dataURL: String, name: String, path: String) async throws {
         _ = try await rpc("file.attach", params: [
             "session_id": sessionID,
             "data_url": dataURL,
@@ -728,4 +727,5 @@ final class HermesGatewayClient {
             "path": path
         ], timeout: 120)
     }
+
 }

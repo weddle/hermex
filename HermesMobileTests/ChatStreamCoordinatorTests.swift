@@ -59,6 +59,49 @@ final class ChatStreamCoordinatorTests: APIClientTestCase {
     }
 
     @MainActor
+    func testBeginTurnAttachesImageBytesBeforeSubmittingPrompt() async throws {
+        let imageData = Data("photo-bytes".utf8)
+        let attachment = PendingAttachment(
+            name: "photo.jpg",
+            path: "/tmp/workspace/photo.jpg",
+            mime: "image/jpeg",
+            size: imageData.count,
+            isImage: true,
+            thumbnailData: nil
+        )
+        let (coordinator, _, _, fabricator) = makeCoordinator { request in
+            switch request.url?.path {
+            case "/api/auth/ws-ticket":
+                return apiTestJSONResponse(#"{"ticket": "ticket-1"}"#, for: request)
+            case "/api/files/download":
+                XCTAssertEqual(request.url?.query, "path=/tmp/workspace/photo.jpg")
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "image/jpeg"]
+                )!
+                return (response, imageData)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        try await coordinator.beginTurn(
+            sessionID: "session-abc",
+            prompt: "Describe this image",
+            attachments: [attachment]
+        )
+
+        let gateway = try XCTUnwrap(fabricator.latest)
+        XCTAssertEqual(gateway.attachedImages.map(\.sessionID), ["session-abc"])
+        XCTAssertEqual(gateway.attachedImages.map(\.filename), ["photo.jpg"])
+        XCTAssertEqual(gateway.attachedImages.map(\.base64), [imageData.base64EncodedString()])
+        XCTAssertEqual(gateway.submittedPrompts.map(\.text), ["Describe this image"])
+    }
+
+    @MainActor
     func testBeginTurnUsesRuntimeSessionIDReturnedByResume() async throws {
         let fabricator = ScriptedGatewayFabricator()
         fabricator.onMake = { gateway, _ in

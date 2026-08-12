@@ -105,6 +105,9 @@ protocol GatewayClientProviding: AnyObject {
     func connect() async throws
     func disconnect()
     func resumeSession(_ sessionID: String) async throws -> GatewayResumeResult
+    func attachImage(sessionID: String, base64: String, filename: String) async throws
+    func attachPDF(sessionID: String, base64: String, filename: String) async throws
+    func attachFile(sessionID: String, dataURL: String, name: String, path: String) async throws
     func submitPrompt(sessionID: String, text: String, rewindOrdinal: Int?) async throws
     func interrupt(sessionID: String) async throws
 }
@@ -250,6 +253,7 @@ final class ChatStreamCoordinator {
     func beginTurn(
         sessionID: String,
         prompt: String,
+        attachments: [PendingAttachment] = [],
         rewindOrdinal: Int? = nil
     ) async throws {
         hasCompletedCurrentResponse = false
@@ -279,7 +283,7 @@ final class ChatStreamCoordinator {
                 }
                 gatewayClient = gateway
                 resolvedSessionID = draft.created.runtimeSessionID
-                activeStreamID = resolvedSessionID
+                try await attach(attachments, to: resolvedSessionID, using: gateway)
                 try await gateway.submitPrompt(sessionID: resolvedSessionID, text: prompt, rewindOrdinal: rewindOrdinal)
             } else {
                 let gateway = try await makeConnectedGateway()
@@ -288,6 +292,7 @@ final class ChatStreamCoordinator {
                 resolvedSessionID = resume.sessionId
                 activeStreamID = resolvedSessionID
                 applyResumePayload(resume)
+                try await attach(attachments, to: resolvedSessionID, using: gateway)
                 try await gateway.submitPrompt(sessionID: resolvedSessionID, text: prompt, rewindOrdinal: rewindOrdinal)
             }
             // If a stray idle event finalized state between resume/create and
@@ -317,6 +322,31 @@ final class ChatStreamCoordinator {
             throw error
         }
     }
+    private func attach(
+        _ attachments: [PendingAttachment],
+        to sessionID: String,
+        using gateway: any GatewayClientProviding
+    ) async throws {
+        for attachment in attachments {
+            let data = try await client.rawFileData(path: attachment.path)
+            let base64 = data.base64EncodedString()
+
+            if attachment.isImage {
+                try await gateway.attachImage(sessionID: sessionID, base64: base64, filename: attachment.name)
+            } else if attachment.mime == "application/pdf" {
+                try await gateway.attachPDF(sessionID: sessionID, base64: base64, filename: attachment.name)
+            } else {
+                let dataURL = "data:\(attachment.mime);base64,\(base64)"
+                try await gateway.attachFile(
+                    sessionID: sessionID,
+                    dataURL: dataURL,
+                    name: attachment.name,
+                    path: attachment.path
+                )
+            }
+        }
+    }
+
 
     /// Applies the resume snapshot's in-flight projection to the visible
     /// streaming message once, so new deltas append to it rather than

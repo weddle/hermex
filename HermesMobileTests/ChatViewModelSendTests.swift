@@ -1330,6 +1330,25 @@ final class ChatViewModelSendTests: XCTestCase {
                   }
                 }
                 """, for: request)
+            case "/api/files/download":
+                let path = URLComponents(
+                    url: try XCTUnwrap(request.url),
+                    resolvingAgainstBaseURL: false
+                )?.queryItems?.first(where: { $0.name == "path" })?.value
+                let data: Data
+                switch path {
+                case "/tmp/workspace/shared-image.jpg":
+                    data = Data("image-a".utf8)
+                default:
+                    data = Data("image-b".utf8)
+                }
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "image/jpeg"]
+                )!
+                return (response, data)
             case "/api/auth/ws-ticket":
                 return apiTestJSONResponse(#"{"ticket": "ticket-1"}"#, for: request)
             default:

@@ -1964,7 +1964,11 @@ final class ChatViewModel {
         cacheCurrentMessages(sessionID: sessionID, modelContext: modelContext)
 
         do {
-            try await streamCoordinator.beginTurn(sessionID: sessionID, prompt: messageForAPI)
+            try await streamCoordinator.beginTurn(
+                sessionID: sessionID,
+                prompt: messageForAPI,
+                attachments: attachmentsToRestoreOnFailure
+            )
             return true
         } catch {
             lastError = error

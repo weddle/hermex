@@ -19,6 +19,7 @@ final class ScriptedGatewayClient: GatewayClientProviding {
     var resumeError: Error?
     var submitError: Error?
     var interruptError: Error?
+    var attachError: Error?
     var resumeResultFactory: (String) -> GatewayResumeResult = { sessionID in
         .empty(sessionID: sessionID)
     }
@@ -28,6 +29,9 @@ final class ScriptedGatewayClient: GatewayClientProviding {
     private(set) var disconnectCount = 0
     private(set) var resumeSessionIDs: [String] = []
     private(set) var submittedPrompts: [(sessionID: String, text: String, rewindOrdinal: Int?)] = []
+    private(set) var attachedImages: [(sessionID: String, base64: String, filename: String)] = []
+    private(set) var attachedPDFs: [(sessionID: String, base64: String, filename: String)] = []
+    private(set) var attachedFiles: [(sessionID: String, dataURL: String, name: String, path: String)] = []
     private(set) var interruptedSessionIDs: [String] = []
 
     init() {}
@@ -53,6 +57,21 @@ final class ScriptedGatewayClient: GatewayClientProviding {
             throw resumeError
         }
         return resumeResultFactory(sessionID)
+    }
+
+    func attachImage(sessionID: String, base64: String, filename: String) async throws {
+        attachedImages.append((sessionID: sessionID, base64: base64, filename: filename))
+        if let attachError { throw attachError }
+    }
+
+    func attachPDF(sessionID: String, base64: String, filename: String) async throws {
+        attachedPDFs.append((sessionID: sessionID, base64: base64, filename: filename))
+        if let attachError { throw attachError }
+    }
+
+    func attachFile(sessionID: String, dataURL: String, name: String, path: String) async throws {
+        attachedFiles.append((sessionID: sessionID, dataURL: dataURL, name: name, path: path))
+        if let attachError { throw attachError }
     }
 
     func submitPrompt(sessionID: String, text: String, rewindOrdinal: Int?) async throws {

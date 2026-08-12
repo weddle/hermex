@@ -116,6 +116,40 @@ final class GatewayTransportTests: XCTestCase {
     }
 
     @MainActor
+    func testAttachImageMintsExpectedGatewayRequest() async throws {
+        let client = HermesGatewayClient(
+            baseURL: try XCTUnwrap(URL(string: "https://example.test")),
+            ticket: "ticket-image",
+            profile: nil
+        )
+        let sendFrames = LockedStringList()
+        client.testSendFrame = { sendFrames.append($0) }
+        try await client.connect()
+
+        let attachTask = Task { @MainActor in
+            try await client.attachImage(
+                sessionID: "session-abc",
+                base64: "cGhvdG8=",
+                filename: "photo.jpg"
+            )
+        }
+        let frame = try await sendFrames.firstFrame()
+        let request = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any]
+        )
+        let params = try XCTUnwrap(request["params"] as? [String: Any])
+
+        XCTAssertEqual(request["method"] as? String, "image.attach_bytes")
+        XCTAssertEqual(params["session_id"] as? String, "session-abc")
+        XCTAssertEqual(params["content_base64"] as? String, "cGhvdG8=")
+        XCTAssertEqual(params["filename"] as? String, "photo.jpg")
+
+        let requestID = try Self.requestID(from: frame)
+        client.testDeliverFrame(Self.responseFrame(id: requestID, result: #"{"attached":true}"#))
+        try await attachTask.value
+    }
+
+    @MainActor
     func testProfileScopesRequestParams() async throws {
         let client = HermesGatewayClient(
             baseURL: try XCTUnwrap(URL(string: "https://example.test")),
