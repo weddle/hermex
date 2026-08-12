@@ -80,16 +80,62 @@ actor APIClient {
         try await send(endpoint: .authStatus, method: "GET")
     }
 
-    func login(password: String) async throws -> LoginResponse {
+    func login(username: String, password: String) async throws -> LoginResponse {
         try await send(
             endpoint: .login,
             method: "POST",
-            body: LoginRequest(password: password)
+            body: LoginRequest(provider: "basic", username: username, password: password)
         )
     }
 
     func logout() async throws -> LoginResponse {
         try await send(endpoint: .logout, method: "POST", body: EmptyBody())
+    }
+
+    /// Mints a single-use WebSocket ticket used to connect `/api/ws`. The
+    /// ticket is consumed on first use (or expires), so each gateway connection
+    /// must mint a fresh ticket.
+    func mintWebSocketTicket(profile: String?) async throws -> String {
+        let body: [String: String]? = profile.map { ["profile": $0] }
+        let response: WSTicketResponse = try await send(
+            endpoint: .wsTicket,
+            method: "POST",
+            body: body
+        )
+        let ticket = response.ticket ?? ""
+        guard !ticket.isEmpty else {
+            throw APIError.decoding(underlying: DecodingError.dataCorrupted(
+                .init(codingPath: [], debugDescription: "Missing WebSocket ticket in response.")
+            ))
+        }
+        return ticket
+    }
+
+    /// Runs one infrequent, non-streaming RPC against the gateway: mints a
+    /// fresh ticket, connects a client, runs `operation`, and disconnects. Used
+    /// for project/catalog/session mutations. It must never be used for chat
+    /// streaming — `ChatStreamCoordinator` owns the persistent gateway client
+    /// for one chat lifecycle.
+    func withGatewayConnection<T>(
+        profile: String?,
+        operation: @escaping @MainActor (HermesGatewayClient) async throws -> T
+    ) async throws -> T {
+        let ticket = try await mintWebSocketTicket(profile: profile)
+        let headers = customHeaderProvider()
+        let baseURL = baseURL
+        return try await Task { @MainActor in
+            let client = HermesGatewayClient(
+                baseURL: baseURL,
+                ticket: ticket,
+                profile: profile,
+                customHeaders: headers
+            )
+            defer { client.disconnect() }
+            try await client.connect()
+            // The connect() must complete before the caller issues its first RPC;
+            // awaiting the open callback guarantees that.
+            return try await operation(client)
+        }.value
     }
 
     func send<Response: Decodable>(
@@ -297,7 +343,14 @@ private extension APIClient {
 }
 
 private struct LoginRequest: Encodable {
+    let provider: String
+    let username: String
     let password: String
+}
+
+/// Response of `POST /api/auth/ws-ticket`.
+struct WSTicketResponse: Decodable {
+    let ticket: String?
 }
 
 private struct EmptyBody: Encodable {}

@@ -102,11 +102,24 @@ final class AuthManager {
             throw APIError.http(statusCode: 200, body: "Unexpected health status.")
         }
 
-        return try await client.authStatus()
+        // Native `/api/status` carries the auth contract: `auth_required` and the
+        // advertised `auth_providers`. A basic provider is the password path we
+        // support; its absence (or a provider list without "basic") is passkey/OAuth
+        // only. Missing fields → unknown, matching the old "treat as today" default.
+        let authEnabled = health.authRequired
+        let hasBasic = health.authProviders?.contains("basic") ?? false
+        return AuthStatusResponse(
+            authEnabled: authEnabled,
+            loggedIn: nil,
+            passwordAuthEnabled: authEnabled == true ? hasBasic : nil,
+            passkeysEnabled: nil,
+            passwordlessEnabled: nil
+        )
     }
 
     func configure(
         serverURLString: String,
+        username: String,
         password: String,
         customHeaders: [CustomHeader]? = nil
     ) async {
@@ -136,12 +149,15 @@ final class AuthManager {
                     return
                 }
 
-                let loginResponse = try await client.login(password: password)
+                let loginResponse = try await client.login(username: username, password: password)
                 guard loginResponse.ok == true else {
                     state = .loggedOut(server: serverURL)
                     lastErrorMessage = APIError.unauthorized.localizedDescription
                     return
                 }
+                // The password-login flow authenticated through the shared cookie
+                // store; persist these cookies so a relaunch restores the session.
+                DashboardCookieStore.capture(for: serverURL, keychain: keychain)
             }
 
             // Persist only on success: the server URL and the headers that reached it.
@@ -182,6 +198,7 @@ final class AuthManager {
     @discardableResult
     func addServer(
         serverURLString: String,
+        username: String,
         password: String,
         customHeaders: [CustomHeader] = []
     ) async -> AddServerOutcome {
@@ -219,11 +236,12 @@ final class AuthManager {
                     return .needsPassword
                 }
 
-                let loginResponse = try await client.login(password: password)
+                let loginResponse = try await client.login(username: username, password: password)
                 guard loginResponse.ok == true else {
                     lastErrorMessage = APIError.unauthorized.localizedDescription
                     return .failed
                 }
+                DashboardCookieStore.capture(for: serverURL, keychain: keychain)
             }
 
             // Commit only now that the add succeeded: the new server becomes
@@ -314,6 +332,7 @@ final class AuthManager {
         refreshServers()
         try? keychain.save(serverURL.absoluteString, forKey: .serverURL)
         hydrateCustomHeaders(for: serverURL)
+        DashboardCookieStore.restore(for: serverURL, keychain: keychain)
         // Drop the App Intents profile picker cache (#339): it holds the previous server's
         // profiles, which would leak into Shortcuts / Siri if the new server's fetch is
         // delayed or fails. The new server's profiles reload on the next foreground fetch.
@@ -371,7 +390,7 @@ final class AuthManager {
     /// its cookies — without touching the registry or the global `server_url` key.
     private func clearLocalArtifacts(for server: URL) {
         try? keychain.delete(.customHeaders, scope: server.absoluteString)
-        clearSessionCookies(for: server)
+        DashboardCookieStore.clear(for: server, keychain: keychain)
     }
 
     /// Tells the server to end the session, but never lets an unreachable or
@@ -436,9 +455,13 @@ final class AuthManager {
 
         if let server {
             try? keychain.delete(.customHeaders, scope: server.absoluteString)
-            clearSessionCookies(for: server)
+            DashboardCookieStore.clear(for: server, keychain: keychain)
         } else {
             clearAllSessionCookies()
+            // Without a scope to target, drop every persisted cookie record. There
+            // is no per-key enumeration on the Keychain, so clear the global one;
+            // scoped records are cleared via server-targeted sign-out (#16).
+            try? keychain.delete(.dashboardCookies)
         }
 
         // Forget the active server in the registry (leaves other servers intact).
@@ -524,6 +547,10 @@ final class AuthManager {
         // first launch after the split) before any client is built, so the first
         // request after launch carries the saved headers (#255/#16).
         hydrateCustomHeaders(for: savedURL)
+        // Restore the saved dashboard session cookies so the first request after
+        // launch is already authenticated; a stale cookie is demoted to logged-out
+        // by the first 401 (#16).
+        DashboardCookieStore.restore(for: savedURL, keychain: keychain)
         state = .loggedIn(server: savedURL)
     }
 
@@ -589,8 +616,10 @@ final class AuthManager {
 protocol AuthAPIClient: Sendable {
     func health() async throws -> HealthResponse
     func authStatus() async throws -> AuthStatusResponse
-    func login(password: String) async throws -> LoginResponse
+    func login(username: String, password: String) async throws -> LoginResponse
     func logout() async throws -> LoginResponse
+    /// Mints a single-use WebSocket ticket for the gateway connection.
+    func mintWebSocketTicket(profile: String?) async throws -> String
 }
 
 extension APIClient: AuthAPIClient {}

@@ -5,6 +5,26 @@ struct HealthResponse: Decodable {
     let sessions: Int?
     let activeStreams: Int?
     let uptimeSeconds: Double?
+    /// Native dashboard `/api/status`: whether the gate engages.
+    let authRequired: Bool?
+    /// Native dashboard `/api/status`: advertised auth providers (["basic"] | ["nous"]).
+    let authProviders: [String]?
+
+    init(
+        status: String? = nil,
+        sessions: Int? = nil,
+        activeStreams: Int? = nil,
+        uptimeSeconds: Double? = nil,
+        authRequired: Bool? = nil,
+        authProviders: [String]? = nil
+    ) {
+        self.status = status
+        self.sessions = sessions
+        self.activeStreams = activeStreams
+        self.uptimeSeconds = uptimeSeconds
+        self.authRequired = authRequired
+        self.authProviders = authProviders
+    }
 }
 
 struct AuthStatusResponse: Decodable {
@@ -37,4 +57,10 @@ struct LoginResponse: Decodable {
     let ok: Bool?
     let message: String?
     let error: String?
+
+    init(ok: Bool? = nil, message: String? = nil, error: String? = nil) {
+        self.ok = ok
+        self.message = message
+        self.error = error
+    }
 }

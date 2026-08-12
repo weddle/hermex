@@ -7,6 +7,7 @@ final class OnboardingViewModel {
     nonisolated static let emptyPasswordMessage = String(localized: "Enter the server password.")
 
     var serverURLString = ""
+    var username = ""
     var password = ""
     var customHeaders: [CustomHeader] = []
     var authStatus: AuthStatusResponse?
@@ -89,6 +90,7 @@ final class OnboardingViewModel {
 
         await authManager.configure(
             serverURLString: serverURLString,
+            username: username,
             password: password,
             customHeaders: customHeaders
         )

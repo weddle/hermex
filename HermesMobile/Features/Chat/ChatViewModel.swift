@@ -478,20 +478,15 @@ final class ChatViewModel {
         isCLISession = session.isCliSession == true
         self.server = server
         let resolvedClient = client ?? APIClient(baseURL: server)
-        let resolvedStreamClient = streamClient ?? SSEClient()
         let resolvedLiveActivityManager = liveActivityManager ?? AgentLiveActivityManager.shared
         self.client = resolvedClient
         self.streamCoordinator = ChatStreamCoordinator(
             client: resolvedClient,
-            streamClient: resolvedStreamClient,
             liveActivityManager: resolvedLiveActivityManager,
             showsLiveActivityResponseExcerpts: showsLiveActivityResponseExcerpts
         )
         self.pendingActionCoordinator = ChatPendingActionCoordinator(
-            client: resolvedClient,
-            approvalStreamClient: approvalStreamClient ?? SSEClient(),
-            clarifyStreamClient: clarifyStreamClient ?? SSEClient(),
-            pollingIntervals: pollingIntervals
+            client: resolvedClient
         )
         self.attachmentCoordinator = ChatAttachmentCoordinator(client: resolvedClient)
         self.btwStreamClient = btwStreamClient ?? SSEClient()
@@ -2132,7 +2127,7 @@ final class ChatViewModel {
             }
 
             completeExplicitModelPickForChatStart(explicitModelPick)
-            streamCoordinator.start(streamID: streamID)
+            await streamCoordinator.start(streamID: streamID)
             return true
         } catch {
             if let streamID = (error as? APIError)?.activeStreamID {
@@ -2147,7 +2142,7 @@ final class ChatViewModel {
                 streamingAssistantMessageID = TranscriptTurnClassifier
                     .currentTurnAssistantAnchorIDs(in: messages, messageOffset: messagesOffset)
                     .first
-                streamCoordinator.start(streamID: streamID)
+                await streamCoordinator.start(streamID: streamID)
                 // The server kept the earlier run, not this newly submitted text.
                 // Report an unaccepted send so ChatView restores the draft while
                 // the coordinator reconnects to the existing response.
@@ -2255,7 +2250,7 @@ final class ChatViewModel {
             pinLocalNoticeMessage(noticeMessage)
         }
 
-        streamCoordinator.start(streamID: streamID)
+        await streamCoordinator.start(streamID: streamID)
         return true
     }
 
@@ -3131,7 +3126,7 @@ final class ChatViewModel {
                 )
             )
 
-            streamCoordinator.start(streamID: streamID)
+            await streamCoordinator.start(streamID: streamID)
             return .executed(message: nil)
         } catch {
             lastError = error
@@ -3394,7 +3389,7 @@ final class ChatViewModel {
 
             streamCoordinator.prepareForNewResponse()
             responseCompletionNeedsTranscriptRefresh = false
-            streamCoordinator.start(streamID: streamID)
+            await streamCoordinator.start(streamID: streamID)
             return true
         } catch {
             lastError = error
@@ -3486,7 +3481,7 @@ final class ChatViewModel {
             completeExplicitModelPickForChatStart(explicitModelPick)
             streamCoordinator.prepareForNewResponse()
             responseCompletionNeedsTranscriptRefresh = false
-            streamCoordinator.start(streamID: streamID)
+            await streamCoordinator.start(streamID: streamID)
             return true
         } catch {
             lastError = error

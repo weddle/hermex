@@ -38,6 +38,12 @@
 		1A2B3C4D5E6F7000000000A1 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000B1 /* AuthManager.swift */; };
 		1A2B3C4D5E6F7000000000A2 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000B2 /* APIClient.swift */; };
 		C04000000000000000000001 /* APIClient+Sessions.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04000000000000000000011 /* APIClient+Sessions.swift */; };
+		GATE00000000000000000001 /* GatewayValue.swift in Sources */ = {isa = PBXBuildFile; fileRef = GATEA000000000000000001 /* GatewayValue.swift */; };
+		GATE00000000000000000002 /* GatewayEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = GATEA000000000000000002 /* GatewayEvent.swift */; };
+		GATE00000000000000000003 /* ConnectionURLPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = GATEA000000000000000003 /* ConnectionURLPolicy.swift */; };
+		GATE00000000000000000004 /* StreamEventParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = GATEA000000000000000004 /* StreamEventParser.swift */; };
+		GATE00000000000000000005 /* HermesGatewayClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = GATEA000000000000000005 /* HermesGatewayClient.swift */; };
+		GATE00000000000000000006 /* DashboardCookieStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = GATEA000000000000000006 /* DashboardCookieStore.swift */; };
 		C04000000000000000000002 /* APIClient+Projects.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04000000000000000000012 /* APIClient+Projects.swift */; };
 		C04000000000000000000003 /* APIClient+Chat.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04000000000000000000013 /* APIClient+Chat.swift */; };
 		C04000000000000000000004 /* APIClient+Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04000000000000000000014 /* APIClient+Workspace.swift */; };
@@ -377,6 +383,12 @@
 		1A2B3C4D5E6F7000000000B1 /* AuthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthManager.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000B2 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
 		C04000000000000000000011 /* APIClient+Sessions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+Sessions.swift"; sourceTree = "<group>"; };
+		GATEA000000000000000001 /* GatewayValue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayValue.swift; sourceTree = "<group>"; };
+		GATEA000000000000000002 /* GatewayEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayEvent.swift; sourceTree = "<group>"; };
+		GATEA000000000000000003 /* ConnectionURLPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionURLPolicy.swift; sourceTree = "<group>"; };
+		GATEA000000000000000004 /* StreamEventParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamEventParser.swift; sourceTree = "<group>"; };
+		GATEA000000000000000005 /* HermesGatewayClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesGatewayClient.swift; sourceTree = "<group>"; };
+		GATEA000000000000000006 /* DashboardCookieStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardCookieStore.swift; sourceTree = "<group>"; };
 		C04000000000000000000012 /* APIClient+Projects.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+Projects.swift"; sourceTree = "<group>"; };
 		C04000000000000000000013 /* APIClient+Chat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+Chat.swift"; sourceTree = "<group>"; };
 		C04000000000000000000014 /* APIClient+Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+Workspace.swift"; sourceTree = "<group>"; };
@@ -473,6 +485,19 @@
 		1A2B3C4D5E6F7000000000D5 /* ChatViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatViewModel.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000D7 /* SSEClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSEClient.swift; sourceTree = "<group>"; };
 		C0FF000000000000000000A2 /* CustomHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomHeader.swift; sourceTree = "<group>"; };
+		GATEB0000000000000000001 /* Gateway */ = {
+			isa = PBXGroup;
+			children = (
+				GATEA000000000000000001 /* GatewayValue.swift */,
+				GATEA000000000000000002 /* GatewayEvent.swift */,
+				GATEA000000000000000003 /* ConnectionURLPolicy.swift */,
+				GATEA000000000000000004 /* StreamEventParser.swift */,
+				GATEA000000000000000005 /* HermesGatewayClient.swift */,
+				GATEA000000000000000006 /* DashboardCookieStore.swift */,
+			);
+			path = Gateway;
+			sourceTree = "<group>";
+		};
 		1A2B3C4D5E6F7000000000D9 /* MessageBubbleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageBubbleView.swift; sourceTree = "<group>"; };
 		BEEF02400000000000000002 /* ChatAttachmentPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatAttachmentPreviewView.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000DB /* MarkdownRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownRenderer.swift; sourceTree = "<group>"; };
@@ -884,6 +909,7 @@
 				C03250000000000000F103 /* MultipartFormData.swift */,
 				1A2B3C4D5E6F7000000000D7 /* SSEClient.swift */,
 				C0FF000000000000000000A2 /* CustomHeader.swift */,
+				GATEB0000000000000000001 /* Gateway */,
 				1A2B3C4D5E6F7000000000B3 /* APIError.swift */,
 				C04400000000000000000002 /* CacheFallbackPolicy.swift */,
 			);
@@ -1432,6 +1458,12 @@
 				A04500000000000000000002 /* HermesDeepLink.swift in Sources */,
 				A04500000000000000000003 /* AgentLiveActivityManager.swift in Sources */,
 				1A2B3C4D5E6F7000000000A2 /* APIClient.swift in Sources */,
+				GATE00000000000000000001 /* GatewayValue.swift in Sources */,
+				GATE00000000000000000002 /* GatewayEvent.swift in Sources */,
+				GATE00000000000000000003 /* ConnectionURLPolicy.swift in Sources */,
+				GATE00000000000000000004 /* StreamEventParser.swift in Sources */,
+				GATE00000000000000000005 /* HermesGatewayClient.swift in Sources */,
+				GATE00000000000000000006 /* DashboardCookieStore.swift in Sources */,
 				C04000000000000000000001 /* APIClient+Sessions.swift in Sources */,
 				C04000000000000000000002 /* APIClient+Projects.swift in Sources */,
 				C04000000000000000000003 /* APIClient+Chat.swift in Sources */,

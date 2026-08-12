@@ -16,15 +16,19 @@ protocol KeychainStoring {
 }
 
 struct KeychainStore: KeychainStoring {
-    enum Key: String {
+enum Key: String {
         case serverURL = "server_url"
         // JSON-encoded [{name, value}] of user-supplied request headers (#255).
         // Values may be secrets, so the list lives in the Keychain, not defaults.
         case customHeaders = "custom_headers"
-        // JSON-encoded multi-server registry (server list + active id). The server
+        // Multi-server registry (server list + active id). The server
         // URL is treated as a credential (PROJECT_SPEC Phase 1), so the registry
         // lives in the Keychain, not UserDefaults (#15).
         case servers = "servers"
+        // JSON-encoded native dashboard session cookies for the active server,
+        // scoped per normalized server URL so one server's session never applies
+        // to another (#16).
+        case dashboardCookies = "dashboard_cookies"
     }
 
     private let keychain: Keychain

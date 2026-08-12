@@ -52,38 +52,19 @@ final class ChatPendingActionCoordinator {
     weak var delegate: ChatPendingActionCoordinatorDelegate?
 
     private let client: APIClient
-    private let approvalStreamClient: SSEStreamingClient
-    private let clarifyStreamClient: SSEStreamingClient
-    private let pollingIntervals: ChatPollingIntervals
 
     private var approvalPendingBySession: [String: ApprovalPromptState] = [:]
-    private var approvalMonitoringSessionID: String?
-    @ObservationIgnored private var approvalPollingTask: Task<Void, Never>?
-
     private var clarificationPendingBySession: [String: ClarificationPromptState] = [:]
-    private var clarificationMonitoringSessionID: String?
-    @ObservationIgnored private var clarificationPollingTask: Task<Void, Never>?
 
     var hasPendingPrompt: Bool {
         approvalPrompt != nil || clarificationPrompt != nil
     }
 
-    init(
-        client: APIClient,
-        approvalStreamClient: SSEStreamingClient,
-        clarifyStreamClient: SSEStreamingClient,
-        pollingIntervals: ChatPollingIntervals
-    ) {
+    init(client: APIClient) {
         self.client = client
-        self.approvalStreamClient = approvalStreamClient
-        self.clarifyStreamClient = clarifyStreamClient
-        self.pollingIntervals = pollingIntervals
     }
 
-    deinit {
-        approvalPollingTask?.cancel()
-        clarificationPollingTask?.cancel()
-    }
+    // MARK: - Approval
 
     func refreshApprovalBypassState() async {
         guard let sessionID = delegate?.pendingActionSessionID else { return }
@@ -113,26 +94,13 @@ final class ChatPendingActionCoordinator {
         defer { isRespondingToApproval = false }
 
         do {
-            _ = try await client.respondApproval(
-                sessionID: prompt.sessionID,
-                choice: choice,
-                approvalID: prompt.pending.approvalId
-            )
+            try await client.withGatewayConnection(profile: nil) { gateway in
+                try await gateway.respondToApproval(sessionID: prompt.sessionID, choice: choice.rawValue)
+            }
             approvalPendingBySession[prompt.sessionID] = nil
             approvalPrompt = nil
-            await refreshApprovalPending(sessionID: prompt.sessionID)
             return true
         } catch {
-            if (error as? APIError)?.indicatesExpiredPendingPrompt == true {
-                // The prompt already expired server-side: dismiss the stale card and
-                // explain, instead of leaving a stuck card behind a generic failure.
-                approvalPendingBySession[prompt.sessionID] = nil
-                approvalPrompt = nil
-                delegate?.pendingActionCoordinatorDidFailAction(PendingPromptExpiredError(prompt: .approval))
-                await refreshApprovalPending(sessionID: prompt.sessionID)
-                return false
-            }
-
             approvalErrorMessage = error.localizedDescription
             delegate?.pendingActionCoordinatorDidFailAction(error)
             return false
@@ -164,13 +132,20 @@ final class ChatPendingActionCoordinator {
     }
 
     func startMonitoring() {
-        startApprovalMonitoring()
-        startClarificationMonitoring()
+        // Approval/clarification prompts arrive as gateway stream events routed
+        // through the chat coordinator, so there is no SSE monitoring to start.
     }
 
     func stopMonitoring(clearPrompt: Bool) {
-        stopApprovalMonitoring(clearPrompt: clearPrompt)
-        stopClarificationMonitoring(clearPrompt: clearPrompt)
+        guard clearPrompt else { return }
+        if let sessionID = delegate?.pendingActionSessionID {
+            approvalPendingBySession[sessionID] = nil
+            clarificationPendingBySession[sessionID] = nil
+        }
+        approvalPrompt = nil
+        approvalErrorMessage = nil
+        clarificationPrompt = nil
+        clarificationErrorMessage = nil
     }
 
     func applyApprovalUpdate(_ update: ApprovalPendingResponse, sessionID: String) {
@@ -187,6 +162,8 @@ final class ChatPendingActionCoordinator {
 
         renderApprovalPromptForCurrentSession()
     }
+
+    // MARK: - Clarification
 
     @discardableResult
     func respondToClarification(_ responseText: String) async -> Bool {
@@ -206,26 +183,14 @@ final class ChatPendingActionCoordinator {
         defer { isRespondingToClarification = false }
 
         do {
-            _ = try await client.respondClarification(
-                sessionID: prompt.sessionID,
-                response: response,
-                clarifyID: prompt.pending.clarifyId
-            )
+            let requestID = prompt.pending.clarifyId ?? ""
+            try await client.withGatewayConnection(profile: nil) { gateway in
+                try await gateway.respondToClarification(requestID: requestID, answer: response)
+            }
             clarificationPendingBySession[prompt.sessionID] = nil
             clarificationPrompt = nil
-            await refreshClarificationPending(sessionID: prompt.sessionID)
             return true
         } catch {
-            if (error as? APIError)?.indicatesExpiredPendingPrompt == true {
-                // The prompt already expired server-side: dismiss the stale card and
-                // explain, instead of leaving a stuck card behind a generic failure.
-                clarificationPendingBySession[prompt.sessionID] = nil
-                clarificationPrompt = nil
-                delegate?.pendingActionCoordinatorDidFailAction(PendingPromptExpiredError(prompt: .clarification))
-                await refreshClarificationPending(sessionID: prompt.sessionID)
-                return false
-            }
-
             clarificationErrorMessage = error.localizedDescription
             delegate?.pendingActionCoordinatorDidFailAction(error)
             return false
@@ -247,85 +212,7 @@ final class ChatPendingActionCoordinator {
         renderClarificationPromptForCurrentSession()
     }
 
-    private func startApprovalMonitoring() {
-        guard let sessionID = delegate?.pendingActionSessionID,
-              delegate?.pendingActionHasActiveStream == true,
-              approvalMonitoringSessionID != sessionID
-        else { return }
-
-        stopApprovalMonitoring(clearPrompt: false)
-        approvalMonitoringSessionID = sessionID
-        approvalStreamClient.start(url: client.approvalStreamURL(sessionID: sessionID)) { [weak self] event in
-            self?.handleApprovalMonitorEvent(event, sessionID: sessionID)
-        }
-    }
-
-    private func stopApprovalMonitoring(clearPrompt: Bool) {
-        let shouldStopStream = approvalMonitoringSessionID != nil || approvalPollingTask != nil
-        approvalPollingTask?.cancel()
-        approvalPollingTask = nil
-        if shouldStopStream {
-            approvalStreamClient.stop()
-        }
-        approvalMonitoringSessionID = nil
-
-        guard clearPrompt else { return }
-        if let sessionID = delegate?.pendingActionSessionID {
-            approvalPendingBySession[sessionID] = nil
-        }
-        approvalPrompt = nil
-        approvalErrorMessage = nil
-    }
-
-    private func handleApprovalMonitorEvent(_ event: SSEEvent, sessionID: String) {
-        switch event {
-        case .approvalPending(let update):
-            applyApprovalUpdate(update, sessionID: sessionID)
-        case .transportError, .error:
-            startApprovalFallbackPolling(sessionID: sessionID)
-        case .token, .interimAssistant, .reasoning, .toolStarted, .toolCompleted, .title, .metering, .done, .clarificationPending,
-             .pendingSteerLeftover, .streamEnd, .cancelled, .heartbeat, .ignored:
-            break
-        }
-    }
-
-    private func startApprovalFallbackPolling(sessionID: String) {
-        guard approvalMonitoringSessionID == sessionID else { return }
-
-        approvalStreamClient.stop()
-        approvalPollingTask?.cancel()
-        let pollingInterval = pollingIntervals.approvalNanoseconds
-        approvalPollingTask = Task { @MainActor [weak self] in
-            pollingLoop: while !Task.isCancelled {
-                do {
-                    guard let self,
-                          self.delegate?.pendingActionSessionID == sessionID,
-                          self.delegate?.pendingActionHasActiveStream == true,
-                          self.delegate?.pendingActionIsStreamConnectionSuspended != true
-                    else { break pollingLoop }
-
-                    await self.refreshApprovalPending(sessionID: sessionID)
-                }
-
-                guard !Task.isCancelled else { break }
-                try? await Task.sleep(nanoseconds: pollingInterval)
-            }
-        }
-    }
-
-    private func refreshApprovalPending(sessionID: String) async {
-        guard delegate?.pendingActionHasActiveStream == true else { return }
-
-        do {
-            let response = try await client.approvalPending(sessionID: sessionID)
-            applyApprovalUpdate(response, sessionID: sessionID)
-        } catch {
-            // The web UI also ignores degraded-mode polling failures.
-            chatPendingActionCoordinatorLogger.debug(
-                "Approval polling failed category=\(APIError.privacySafeLogCategory(for: error), privacy: .public)"
-            )
-        }
-    }
+    // MARK: - Rendering
 
     private func renderApprovalPromptForCurrentSession() {
         guard let sessionID = delegate?.pendingActionSessionID else {
@@ -344,93 +231,6 @@ final class ChatPendingActionCoordinator {
         }
 
         approvalPrompt = prompt
-    }
-
-    private func startClarificationMonitoring() {
-        guard let sessionID = delegate?.pendingActionSessionID,
-              delegate?.pendingActionHasActiveStream == true,
-              clarificationMonitoringSessionID != sessionID
-        else { return }
-
-        stopClarificationMonitoring(clearPrompt: false)
-        clarificationMonitoringSessionID = sessionID
-        clarifyStreamClient.start(url: client.clarifyStreamURL(sessionID: sessionID)) { [weak self] event in
-            self?.handleClarificationMonitorEvent(event, sessionID: sessionID)
-        }
-    }
-
-    private func stopClarificationMonitoring(clearPrompt: Bool) {
-        let shouldStopStream = clarificationMonitoringSessionID != nil || clarificationPollingTask != nil
-        clarificationPollingTask?.cancel()
-        clarificationPollingTask = nil
-        if shouldStopStream {
-            clarifyStreamClient.stop()
-        }
-        clarificationMonitoringSessionID = nil
-
-        guard clearPrompt else { return }
-        if let sessionID = delegate?.pendingActionSessionID {
-            clarificationPendingBySession[sessionID] = nil
-        }
-        clarificationPrompt = nil
-        clarificationErrorMessage = nil
-    }
-
-    private func handleClarificationMonitorEvent(_ event: SSEEvent, sessionID: String) {
-        switch event {
-        case .clarificationPending(let update):
-            applyClarificationUpdate(update, sessionID: sessionID)
-        case .approvalPending(let update):
-            if update.pending == nil {
-                applyClarificationUpdate(
-                    ClarificationPendingResponse(pending: nil, pendingCount: update.pendingCount),
-                    sessionID: sessionID
-                )
-            }
-        case .transportError, .error:
-            startClarificationFallbackPolling(sessionID: sessionID)
-        case .token, .interimAssistant, .reasoning, .toolStarted, .toolCompleted, .title, .metering, .done,
-             .pendingSteerLeftover, .streamEnd, .cancelled, .heartbeat, .ignored:
-            break
-        }
-    }
-
-    private func startClarificationFallbackPolling(sessionID: String) {
-        guard clarificationMonitoringSessionID == sessionID else { return }
-
-        clarifyStreamClient.stop()
-        clarificationPollingTask?.cancel()
-        let pollingInterval = pollingIntervals.clarificationNanoseconds
-        clarificationPollingTask = Task { @MainActor [weak self] in
-            pollingLoop: while !Task.isCancelled {
-                do {
-                    guard let self,
-                          self.delegate?.pendingActionSessionID == sessionID,
-                          self.delegate?.pendingActionHasActiveStream == true,
-                          self.delegate?.pendingActionIsStreamConnectionSuspended != true
-                    else { break pollingLoop }
-
-                    await self.refreshClarificationPending(sessionID: sessionID)
-                }
-
-                guard !Task.isCancelled else { break }
-                try? await Task.sleep(nanoseconds: pollingInterval)
-            }
-        }
-    }
-
-    private func refreshClarificationPending(sessionID: String) async {
-        guard delegate?.pendingActionHasActiveStream == true else { return }
-
-        do {
-            let response = try await client.clarifyPending(sessionID: sessionID)
-            applyClarificationUpdate(response, sessionID: sessionID)
-        } catch {
-            // The web UI also ignores degraded-mode polling failures.
-            chatPendingActionCoordinatorLogger.debug(
-                "Clarification polling failed category=\(APIError.privacySafeLogCategory(for: error), privacy: .public)"
-            )
-        }
     }
 
     private func renderClarificationPromptForCurrentSession() {

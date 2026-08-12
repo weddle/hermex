@@ -5,6 +5,7 @@ enum Endpoint {
     case authStatus
     case login
     case logout
+    case wsTicket
     case sessions(includeArchived: Bool = false, archivedLimit: Int? = nil)
     case sessionsSearch(query: String, content: Bool, depth: Int)
     case session(id: String, includeMessages: Bool, messageLimit: Int?, messageBefore: Int?, expandRenderable: Bool = false)
@@ -128,13 +129,15 @@ enum Endpoint {
     var path: String {
         switch self {
         case .health:
-            return "/health"
+            return "/api/status"
         case .authStatus:
-            return "/api/auth/status"
+            return "/api/auth/providers"
         case .login:
-            return "/api/auth/login"
+            return "/auth/password-login"
         case .logout:
-            return "/api/auth/logout"
+            return "/auth/logout"
+        case .wsTicket:
+            return "/api/auth/ws-ticket"
         case .sessions:
             return "/api/sessions"
         case .sessionsSearch:
