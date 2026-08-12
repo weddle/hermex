@@ -44,10 +44,11 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
             serverRegistry: ServerRegistry.inMemory()
         )
 
-        await manager.configure(serverURLString: "100.96.12.34:9119", password: "")
+        await manager.configure(serverURLString: "100.96.12.34:9119", username: "", password: "")
 
         let expectedURL = try XCTUnwrap(URL(string: "http://100.96.12.34:9119"))
         XCTAssertEqual(requestedURLs, [expectedURL])
+        XCTAssertEqual(client.loginUsernames, [])
         XCTAssertEqual(client.loginPasswords, [])
         XCTAssertEqual(keychain.savedValues[.serverURL], expectedURL.absoluteString)
         XCTAssertEqual(manager.state, .loggedIn(server: expectedURL))
@@ -79,8 +80,9 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
             serverRegistry: ServerRegistry.inMemory()
         )
 
-        await manager.configure(serverURLString: "https://example.test", password: "")
+        await manager.configure(serverURLString: "https://example.test", username: "", password: "")
 
+        XCTAssertEqual(client.loginUsernames, [])
         XCTAssertEqual(client.loginPasswords, [])
         XCTAssertNil(keychain.savedValues[.serverURL])
         XCTAssertEqual(manager.state, .unconfigured)
@@ -97,9 +99,10 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
             serverRegistry: ServerRegistry.inMemory()
         )
 
-        await manager.configure(serverURLString: "https://example.test", password: "secret")
+        await manager.configure(serverURLString: "https://example.test", username: "alice", password: "secret")
 
         let expectedURL = try XCTUnwrap(URL(string: "https://example.test"))
+        XCTAssertEqual(client.loginUsernames, ["alice"])
         XCTAssertEqual(client.loginPasswords, ["secret"])
         XCTAssertEqual(keychain.savedValues[.serverURL], expectedURL.absoluteString)
         XCTAssertEqual(manager.state, .loggedIn(server: expectedURL))
@@ -173,7 +176,7 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
             let message = APIError.http(statusCode: statusCode, body: body).localizedDescription
             XCTAssertEqual(
                 message,
-                "The server or Cloudflare tunnel is unavailable. Check that the Mac is awake, hermes-webui is running, and the tunnel is connected."
+                "The server or tunnel is unavailable. Check that the Mac is awake, the Hermes Agent dashboard is running, and the tunnel is connected."
             )
             XCTAssertFalse(message.contains("<html>"))
             XCTAssertFalse(message.localizedCaseInsensitiveContains("bad gateway"))
@@ -207,7 +210,7 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
 
         XCTAssertEqual(
             error.localizedDescription,
-            "The server did not respond in time. Check that the Mac is awake, hermes-webui is running, and the tunnel is connected."
+            "The server did not respond in time. Check that the Mac is awake, the Hermes Agent dashboard is running, and the tunnel is connected."
         )
     }
 

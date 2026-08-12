@@ -142,7 +142,30 @@ final class MockAuthAPIClient: AuthAPIClient, @unchecked Sendable {
     }
 
     func health() async throws -> HealthResponse {
-        HealthResponse(status: "ok", sessions: nil, activeStreams: nil, uptimeSeconds: nil)
+        // The native `/api/status` probe carries the auth contract; `AuthManager`
+        // derives `AuthStatusResponse` from `health.authRequired` +
+        // `health.authProviders` (it no longer calls `authStatus()`). Map the
+        // injected legacy status into those fields so the manager tests exercise
+        // the same login/passkey/no-auth paths: an explicit `passwordAuthEnabled
+        // == false` means a passkey-only server (no "basic" provider); otherwise
+        // an auth-enabled server advertises basic.
+        let authEnabled = authStatusResponse.authEnabled
+        let authProviders: [String]?
+        if authEnabled == true, authStatusResponse.passwordAuthEnabled == false {
+            authProviders = ["nous"]
+        } else if authEnabled == true {
+            authProviders = ["basic"]
+        } else {
+            authProviders = nil
+        }
+        return HealthResponse(
+            status: "ok",
+            sessions: nil,
+            activeStreams: nil,
+            uptimeSeconds: nil,
+            authRequired: authEnabled,
+            authProviders: authProviders
+        )
     }
 
     func authStatus() async throws -> AuthStatusResponse {

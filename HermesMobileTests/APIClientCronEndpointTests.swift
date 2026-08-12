@@ -9,39 +9,38 @@ import UniformTypeIdentifiers
 final class APIClientCronEndpointTests: APIClientTestCase {
     func testCronsBuildsExpectedPathAndDecodesTolerantJobList() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/crons")
+            XCTAssertEqual(request.url?.path, "/api/cron/jobs")
             XCTAssertEqual(request.httpMethod, "GET")
             XCTAssertNil(request.url?.query)
 
+            // Native `/api/cron/jobs` returns a bare array of job records.
             return apiTestJSONResponse("""
-            {
-              "jobs": [
-                {
-                  "id": "job123",
-                  "name": "Morning digest",
-                  "prompt": "Summarize overnight activity",
-                  "schedule": {"kind": "cron", "expr": "0 7 * * *", "unexpected": true},
-                  "schedule_display": "0 7 * * *",
-                  "enabled": true,
-                  "state": "scheduled",
-                  "next_run_at": "2026-05-05T11:00:00Z",
-                  "last_run_at": 1777892400,
-                  "last_status": "ok",
-                  "deliver": "local",
-                  "skills": ["summarize", "notify"],
-                  "ignored_new_field": {"nested": "value"}
-                },
-                {
-                  "id": "legacy-broken",
-                  "schedule": {"kind": "cron", "expr": "0 8 * * *"},
-                  "repeat": {"times": null, "completed": 17},
-                  "enabled": false,
-                  "state": "completed",
-                  "next_run_at": null,
-                  "last_status": "ok"
-                }
-              ]
-            }
+            [
+              {
+                "id": "job123",
+                "name": "Morning digest",
+                "prompt": "Summarize overnight activity",
+                "schedule": {"kind": "cron", "expr": "0 7 * * *", "unexpected": true},
+                "schedule_display": "0 7 * * *",
+                "enabled": true,
+                "state": "scheduled",
+                "next_run_at": "2026-05-05T11:00:00Z",
+                "last_run_at": 1777892400,
+                "last_status": "ok",
+                "deliver": "local",
+                "skills": ["summarize", "notify"],
+                "ignored_new_field": {"nested": "value"}
+              },
+              {
+                "id": "legacy-broken",
+                "schedule": {"kind": "cron", "expr": "0 8 * * *"},
+                "repeat": {"times": null, "completed": 17},
+                "enabled": false,
+                "state": "completed",
+                "next_run_at": null,
+                "last_status": "ok"
+              }
+            ]
             """, for: request)
         }
 
@@ -64,95 +63,49 @@ final class APIClientCronEndpointTests: APIClientTestCase {
         XCTAssertEqual(second.displayName, "0 8 * * *")
     }
 
-    func testCronStatusWithoutJobIDBuildsExpectedPathAndDecodesRunningMap() async throws {
+    func testCronRunsBuildsExpectedPathAndDecodesRunSessions() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/crons/status")
-            XCTAssertEqual(request.httpMethod, "GET")
-            XCTAssertNil(request.url?.query)
-
-            return apiTestJSONResponse("""
-            {
-              "running": {
-                "job123": 12.4,
-                "job456": 61
-              }
-            }
-            """, for: request)
-        }
-
-        let response = try await client.cronStatus()
-
-        XCTAssertEqual(response.runningJobs?["job123"], 12.4)
-        XCTAssertEqual(response.runningJobs?["job456"], 61)
-        XCTAssertNil(response.running)
-    }
-
-    func testCronStatusWithJobIDBuildsExpectedQueryAndDecodesSingleStatus() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/crons/status")
+            XCTAssertEqual(request.url?.path, "/api/cron/jobs/job123/runs")
             XCTAssertEqual(request.httpMethod, "GET")
 
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
-            let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
-            XCTAssertEqual(query["job_id"], "job123")
-
-            return apiTestJSONResponse("""
-            {
-              "job_id": "job123",
-              "running": true,
-              "elapsed": 12.4
-            }
-            """, for: request)
-        }
-
-        let response = try await client.cronStatus(jobID: "job123")
-
-        XCTAssertEqual(response.jobId, "job123")
-        XCTAssertEqual(response.running, true)
-        XCTAssertEqual(response.elapsed, 12.4)
-        XCTAssertNil(response.runningJobs)
-    }
-
-    func testCronOutputBuildsExpectedQueryAndDecodesResponse() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/crons/output")
-            XCTAssertEqual(request.httpMethod, "GET")
-
-            let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
-            let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
-            XCTAssertEqual(query["job_id"], "job123")
+            let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
             XCTAssertEqual(query["limit"], "5")
 
             return apiTestJSONResponse("""
             {
-              "job_id": "job123",
-              "outputs": [
+              "runs": [
                 {
-                  "filename": "2026-05-04_10-00-00.md",
-                  "content": "## Response\\n\\nAll clear."
+                  "session_id": "run-1",
+                  "title": "2026-05-04_10-00-00.md",
+                  "started_at": 1777892400,
+                  "created_at": 1777806000,
+                  "model": "gpt-5.4",
+                  "profile": "work"
                 },
                 {
-                  "filename": "2026-05-04_09-00-00.md",
-                  "content": ""
+                  "session_id": "run-2",
+                  "title": "2026-05-04_09-00-00.md",
+                  "started_at": 1777858800
                 }
               ]
             }
             """, for: request)
         }
 
-        let response = try await client.cronOutput(jobID: "job123", limit: 5)
+        let response = try await client.cronRuns(jobID: "job123", limit: 5)
 
-        XCTAssertEqual(response.jobId, "job123")
         XCTAssertEqual(response.outputs?.count, 2)
         XCTAssertEqual(response.outputs?.first?.filename, "2026-05-04_10-00-00.md")
-        XCTAssertEqual(response.outputs?.first?.content, "## Response\n\nAll clear.")
+        XCTAssertEqual(response.outputs?.first?.runID, "run-1")
+        XCTAssertEqual(response.outputs?.first?.runStartedAt, 1_777_892_400)
         XCTAssertEqual(response.outputs?.last?.filename, "2026-05-04_09-00-00.md")
-        XCTAssertEqual(response.outputs?.last?.content, "")
+        XCTAssertNil(response.outputs?.first?.content)
     }
 
-    func testCronCreateBuildsExpectedBodyAndDecodesMutationResponse() async throws {
+    func testCronCreateBuildsExpectedBodyAndDecodesBareJob() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/crons/create")
+            XCTAssertEqual(request.url?.path, "/api/cron/jobs")
             XCTAssertEqual(request.httpMethod, "POST")
 
             let data = try XCTUnwrap(apiTestBodyData(from: request))
@@ -167,20 +120,18 @@ final class APIClientCronEndpointTests: APIClientTestCase {
             XCTAssertEqual(body?["profile"] as? String, "work")
             XCTAssertEqual(body?["toast_notifications"] as? Bool, true)
 
+            // Native create returns the created job record directly.
             return apiTestJSONResponse("""
             {
-              "ok": true,
-              "job": {
-                "job_id": "job-new",
-                "name": "Morning digest",
-                "prompt": "Summarize overnight activity",
-                "schedule": "0 7 * * *",
-                "enabled": true,
-                "state": "scheduled",
-                "model": "@openai:gpt-5.5",
-                "profile": "work",
-                "toast_notifications": true
-              }
+              "id": "job-new",
+              "name": "Morning digest",
+              "prompt": "Summarize overnight activity",
+              "schedule": "0 7 * * *",
+              "enabled": true,
+              "state": "scheduled",
+              "model": "@openai:gpt-5.5",
+              "profile": "work",
+              "toast_notifications": true
             }
             """, for: request)
         }
@@ -197,46 +148,42 @@ final class APIClientCronEndpointTests: APIClientTestCase {
             toastNotifications: true
         )
 
-        XCTAssertEqual(response.ok, true)
         XCTAssertEqual(response.job?.jobId, "job-new")
         XCTAssertEqual(response.job?.scheduleText, "0 7 * * *")
+        XCTAssertEqual(response.job?.displayName, "Morning digest")
         XCTAssertEqual(response.job?.model, "@openai:gpt-5.5")
         XCTAssertEqual(response.job?.toastNotifications, true)
     }
 
-    func testCronUpdateBuildsExpectedBodyAndDecodesMutationResponse() async throws {
+    func testCronUpdateBuildsExpectedBodyAndDecodesBareJob() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/crons/update")
-            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.path, "/api/cron/jobs/job123")
+            XCTAssertEqual(request.httpMethod, "PUT")
 
             let data = try XCTUnwrap(apiTestBodyData(from: request))
             let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            XCTAssertEqual(body?["job_id"] as? String, "job123")
-            XCTAssertEqual(body?["prompt"] as? String, "Updated prompt")
-            XCTAssertEqual(body?["schedule"] as? String, "0 8 * * *")
-            XCTAssertEqual(body?["name"] as? String, "Updated digest")
-            XCTAssertEqual(body?["deliver"] as? String, "local")
-            XCTAssertEqual(body?["skills"] as? [String], ["swift"])
-            XCTAssertEqual(body?["model"] as? String, "@anthropic:claude")
-            XCTAssertEqual(body?["provider"] as? String, "anthropic")
-            XCTAssertEqual(body?["profile"] as? String, "personal")
-            XCTAssertEqual(body?["toast_notifications"] as? Bool, false)
+            let updates = try XCTUnwrap(body?["updates"] as? [String: Any])
+            XCTAssertEqual(updates["prompt"] as? String, "Updated prompt")
+            XCTAssertEqual(updates["schedule"] as? String, "0 8 * * *")
+            XCTAssertEqual(updates["name"] as? String, "Updated digest")
+            XCTAssertEqual(updates["deliver"] as? String, "local")
+            XCTAssertEqual(updates["skills"] as? [String], ["swift"])
+            XCTAssertEqual(updates["model"] as? String, "@anthropic:claude")
+            XCTAssertEqual(updates["provider"] as? String, "anthropic")
+            XCTAssertEqual(updates["profile"] as? String, "personal")
 
             return apiTestJSONResponse("""
             {
-              "ok": true,
-              "job": {
-                "id": "job123",
-                "name": "Updated digest",
-                "prompt": "Updated prompt",
-                "schedule": {"kind": "cron", "expr": "0 8 * * *"},
-                "enabled": true,
-                "state": "scheduled",
-                "model": "@anthropic:claude",
-                "provider": "anthropic",
-                "profile": "personal",
-                "toast_notifications": false
-              }
+              "id": "job123",
+              "name": "Updated digest",
+              "prompt": "Updated prompt",
+              "schedule": {"kind": "cron", "expr": "0 8 * * *"},
+              "enabled": true,
+              "state": "scheduled",
+              "model": "@anthropic:claude",
+              "provider": "anthropic",
+              "profile": "personal",
+              "toast_notifications": false
             }
             """, for: request)
         }
@@ -264,7 +211,7 @@ final class APIClientCronEndpointTests: APIClientTestCase {
 
     func testCronCreateSendsProviderWhenSet() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/crons/create")
+            XCTAssertEqual(request.url?.path, "/api/cron/jobs")
 
             let data = try XCTUnwrap(apiTestBodyData(from: request))
             let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -272,13 +219,10 @@ final class APIClientCronEndpointTests: APIClientTestCase {
 
             return apiTestJSONResponse("""
             {
-              "ok": true,
-              "job": {
-                "id": "job-provider",
-                "prompt": "Run it",
-                "schedule": "0 7 * * *",
-                "provider": "openai"
-              }
+              "id": "job-provider",
+              "prompt": "Run it",
+              "schedule": "0 7 * * *",
+              "provider": "openai"
             }
             """, for: request)
         }
@@ -300,17 +244,18 @@ final class APIClientCronEndpointTests: APIClientTestCase {
 
     func testCronDeliveryOptionsBuildsExpectedPathAndDecodesTolerantly() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/crons/delivery-options")
+            XCTAssertEqual(request.url?.path, "/api/cron/delivery-targets")
             XCTAssertEqual(request.httpMethod, "GET")
             XCTAssertNil(request.url?.query)
 
+            // Native `/api/cron/delivery-targets` returns `{targets: [{id, name}]}`.
             return apiTestJSONResponse("""
             {
-              "platforms": [
-                {"value": "local", "label": "Local (save output only)"},
-                {"value": "origin", "label": "Origin (reply to creator)"},
-                {"value": "slack", "label": "Slack", "unexpected_field": {"nested": true}},
-                {"value": "telegram"}
+              "targets": [
+                {"id": "local", "name": "Local (save output only)"},
+                {"id": "origin", "name": "Origin (reply to creator)"},
+                {"id": "slack", "name": "Slack", "unexpected_field": {"nested": true}},
+                {"id": "telegram"}
               ],
               "ignored_new_field": 7
             }
@@ -327,7 +272,7 @@ final class APIClientCronEndpointTests: APIClientTestCase {
 
     func testCronDeliveryOptionsToleratesUnexpectedPlatformsShape() async throws {
         let client = makeClient { request in
-            apiTestJSONResponse(#"{"platforms": "unexpected"}"#, for: request)
+            apiTestJSONResponse(#"{"targets": "unexpected"}"#, for: request)
         }
 
         let response = try await client.cronDeliveryOptions()
@@ -336,32 +281,32 @@ final class APIClientCronEndpointTests: APIClientTestCase {
     }
 
     func testCronJobIDMutationsBuildExpectedPathsAndBodies() async throws {
-        var expectedRequests: [(path: String, reason: String?)] = [
-            ("/api/crons/run", nil),
-            ("/api/crons/pause", "Manual pause"),
-            ("/api/crons/resume", nil),
-            ("/api/crons/delete", nil)
+        var expectedRequests: [(path: String, method: String, reason: String?)] = [
+            ("/api/cron/jobs/job123/trigger", "POST", nil),
+            ("/api/cron/jobs/job123/pause", "POST", "Manual pause"),
+            ("/api/cron/jobs/job123/resume", "POST", nil),
+            ("/api/cron/jobs/job123", "DELETE", nil)
         ]
 
         let client = makeClient { request in
             let expected = expectedRequests.removeFirst()
             XCTAssertEqual(request.url?.path, expected.path)
-            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.httpMethod, expected.method)
 
-            let data = try XCTUnwrap(apiTestBodyData(from: request))
-            let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            XCTAssertEqual(body?["job_id"] as? String, "job123")
-            XCTAssertEqual(body?["reason"] as? String, expected.reason)
+            if let reason = expected.reason {
+                let data = try XCTUnwrap(apiTestBodyData(from: request))
+                let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                XCTAssertEqual(body?["reason"] as? String, reason)
+            } else {
+                XCTAssertNil(apiTestBodyData(from: request), "No body expected for \(expected.path)")
+            }
 
             return apiTestJSONResponse("""
             {
-              "ok": true,
-              "job": {
-                "id": "job123",
-                "name": "Digest",
-                "enabled": true,
-                "state": "scheduled"
-              }
+              "id": "job123",
+              "name": "Digest",
+              "enabled": true,
+              "state": "scheduled"
             }
             """, for: request)
         }
@@ -378,23 +323,21 @@ final class APIClientCronEndpointTests: APIClientTestCase {
         XCTAssertTrue(expectedRequests.isEmpty)
     }
 
-    func testCronOutputOmitsLimitWhenNil() async throws {
+    func testCronRunsOmitsLimitWhenNil() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/crons/output")
+            XCTAssertEqual(request.url?.path, "/api/cron/jobs/job456/runs")
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
-            let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
-            XCTAssertEqual(query["job_id"], "job456")
+            let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
             XCTAssertNil(query["limit"])
 
             return apiTestJSONResponse("""
             {
-              "job_id": "job456",
-              "outputs": []
+              "runs": []
             }
             """, for: request)
         }
 
-        let response = try await client.cronOutput(jobID: "job456", limit: nil)
+        let response = try await client.cronRuns(jobID: "job456", limit: nil)
         XCTAssertEqual(response.outputs?.count, 0)
     }
 }
