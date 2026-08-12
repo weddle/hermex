@@ -4,7 +4,7 @@
 
 # Hermex
 
-**Control your self-hosted [Hermes](https://github.com/nesquena/hermes-webui) agent from your iPhone.**
+**Work-in-progress fork of [Hermex](https://github.com/uzairansaruzi/hermex) for the native Hermes Agent dashboard.**
 
 Your server. Your iPhone. No middleman.
 
@@ -23,6 +23,9 @@ Your server. Your iPhone. No middleman.
 <img src="docs/assets/readme/hero-devices.png" alt="Hermex running on two iPhones: a streaming chat session and the home screen with Tasks, Skills, Memory, Insights, and Sessions" width="720" />
 
 </div>
+
+> [!WARNING]
+> This repository is a work-in-progress fork of Hermex. It is replacing the app's dependency on the separate [`hermes-webui`](https://github.com/nesquena/hermes-webui) service with the native Hermes Agent dashboard and gateway. The migration is incomplete; features and documentation below may still describe the upstream WebUI-backed release. Backend connectivity was ported and adapted from [Hermes Conduit](https://github.com/kaishi00/hermes-conduit) by [kaishi00](https://github.com/kaishi00), under its MIT License.
 
 Hermex is a native SwiftUI iPhone app for driving a self-hosted [hermes-webui](https://github.com/nesquena/hermes-webui) server — a mobile cockpit for an AI agent that lives on a machine **you** control. The phone is the control plane, not the compute plane: the agent, its tools, and your data stay on your own hardware.
 
@@ -137,8 +140,10 @@ Hermex is free and built in the open. If it's useful to you:
 
 <a href="https://buymeacoffee.com/callmeuzi"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-callmeuzi-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee" height="40" /></a>
 
-## License
+## License and attribution
 
-MIT — see [LICENSE](LICENSE).
+This fork remains available under the MIT License; see [LICENSE](LICENSE).
 
-Hermex is an independent client and is not affiliated with the upstream [hermes-webui](https://github.com/nesquena/hermes-webui) project. Apple, the Apple logo, and App Store are trademarks of Apple Inc.
+Hermex was created by Uzair Ansar. The native Hermes Agent backend connectivity in this fork—including the WebSocket JSON-RPC transport, event parsing, connection URL policy, and dashboard cookie persistence—was ported and adapted from [Hermes Conduit](https://github.com/kaishi00/hermes-conduit), created by [kaishi00](https://github.com/kaishi00). Hermes Conduit is also MIT-licensed. Its copyright and license notice are reproduced in [LICENSE](LICENSE).
+
+Hermex is an independent client and is not affiliated with Hermes Conduit, Hermes Agent, or the upstream [hermes-webui](https://github.com/nesquena/hermes-webui) project. Apple, the Apple logo, and App Store are trademarks of Apple Inc.
