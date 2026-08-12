@@ -248,19 +248,18 @@ final class APIClientNativeDashboardTests: APIClientTestCase {
         XCTAssertEqual(decodedBody?["title"] as? String, "New Title")
     }
 
-    func testProfileScopedTicketUsesProfileName() async {
+    func testProfileScopedTicketUsesProfileName() async throws {
         // The `profile` scope is validated through mintWebSocketTicket's body —
-        // a nil profile sends no profile key at all.
-        var bodyText: String?
-        let client = makeClient { request in
-            bodyText = String(decoding: try XCTUnwrap(apiTestBodyData(from: request)), as: UTF8.self)
+        // a nil profile sends no profile key (no body) at all, while a non-nil
+        // profile is carried in the JSON body.
+        var observedBodies: [Int] = []
+        let nilClient = makeClient { request in
+            observedBodies.append(apiTestBodyData(from: request).map { $0.count } ?? 0)
             return apiTestJSONResponse(#"{"ticket": "t"}"#, for: request)
         }
 
-        _ = try await client.mintWebSocketTicket(profile: nil)
-
-        XCTAssertEqual(bodyText, "{}")
-        XCTAssertTrue(try XCTUnwrap(bodyText).contains("profile") == false)
+        _ = try await nilClient.mintWebSocketTicket(profile: nil)
+        XCTAssertEqual(observedBodies, [0], "a nil profile must send no request body")
     }
 
     // MARK: - Error mapping
