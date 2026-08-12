@@ -184,7 +184,7 @@ final class APIClientNativeDashboardTests: APIClientTestCase {
 
         let list = try await client.sessions()
         XCTAssertEqual(requestedPath, "/api/sessions")
-        XCTAssertTrue(list.sessions.isEmpty)
+        XCTAssertTrue(list.sessions?.isEmpty == true)
     }
 
     func testSessionDetailHitsSessionAndMessagesRoutes() async throws {

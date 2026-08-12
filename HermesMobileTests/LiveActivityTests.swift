@@ -3,9 +3,9 @@ import XCTest
 
 /// Live Activity tests for the chat run surface.
 ///
-/// The SSE-era `LiveActivitySpySSEClient`/`streamClient.emit(...)` plumbing has
-/// no gateway equivalent: the session IS the stream, and live events stream in
-/// as `GatewayEvent` notifications delivered through the shared
+/// The legacy live-activity streaming double plumbing has no gateway
+/// equivalent: the session IS the stream, and live events stream in as
+/// `GatewayEvent` notifications delivered through the shared
 /// `ScriptedGatewayFabricator`/`ScriptedGatewayClient`/`GatewayEventFixture`
 /// doubles (`.messageDelta`, `.reasoningDelta`, `.toolStarted`, `.toolCompleted`,
 /// `.sessionTitle`, `.sessionInfo`, `.messageComplete`). Pure reducer/sanitizer/
