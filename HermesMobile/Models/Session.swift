@@ -34,6 +34,10 @@ struct ProjectsResponse: Decodable, Equatable {
         case projects
     }
 
+    init(projects: [ProjectSummary]?) {
+        self.projects = projects
+    }
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         projects = try? container.decodeIfPresent([ProjectSummary].self, forKey: .projects)
@@ -44,6 +48,12 @@ struct ProjectMutationResponse: Decodable, Equatable {
     let ok: Bool?
     let project: ProjectSummary?
     let error: String?
+
+    init(ok: Bool?, project: ProjectSummary?, error: String?) {
+        self.ok = ok
+        self.project = project
+        self.error = error
+    }
 
     enum CodingKeys: String, CodingKey {
         case ok
@@ -66,6 +76,18 @@ struct ProjectSummary: Decodable, Equatable, Hashable, Identifiable {
     let name: String?
     let color: String?
     let createdAt: Double?
+
+    init(
+        projectId: String?,
+        name: String?,
+        color: String?,
+        createdAt: Double?
+    ) {
+        self.projectId = projectId
+        self.name = name
+        self.color = color
+        self.createdAt = createdAt
+    }
 
     enum CodingKeys: String, CodingKey {
         case projectId

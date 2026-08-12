@@ -496,6 +496,17 @@ final class HermesGatewayClient {
         ])
     }
 
+    func updateProject(id: String, name: String?, color: String?) async throws -> GatewayValue {
+        var params: [String: Any] = ["id": id]
+        if let name, !name.isEmpty { params["name"] = name }
+        if let color, !color.isEmpty { params["color"] = color }
+        return try await rpc("projects.update", params: params)
+    }
+
+    func deleteProject(id: String) async throws -> GatewayValue {
+        try await rpc("projects.delete", params: ["id": id])
+    }
+
     func moveSession(_ sessionID: String, toProject projectID: String?) async throws {
         var params: [String: Any] = ["session_id": sessionID]
         if let projectID, !projectID.isEmpty {
